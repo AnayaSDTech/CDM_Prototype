@@ -125,8 +125,7 @@
     const R = A.RUN, running = R && ['running', 'paused', 'stopping'].includes(R.status);
     const runChip = running ? `<span class="chip plain"><span class="dot ${R.status === 'paused' ? 'amber' : 'pulse'}"></span>Run ${esc(R.status)}</span>` : '';
     $('#top').innerHTML = `<div class="badge-logo">CDM</div><div><h1>Certificate Deployment Manager</h1><div class="tagline">Automated discovery, renewal, deployment and rollback across Linux, Windows and Java estates</div></div>
-      <div class="actions">${runChip}<span class="chip">${S.settings.acmeEnv === 'staging' ? "ACME · Let's Encrypt staging" : "ACME · Let's Encrypt production"}</span>
-      <button class="chip plain" data-act="nav" data-v="audit" title="PostgreSQL audit mirror"><span class="dot ${S.db.outage ? 'red pulse' : ''}"></span>${S.db.outage ? 'DB mirror down · ' + S.db.pending + ' queued' : 'PostgreSQL mirror · live'}</button>
+      <div class="actions">${runChip}
       <button class="btn" data-act="theme">${icon('sun')}Theme</button>
       <button class="btn ${S.killSwitch ? 'good' : 'danger'}" data-act="killswitch">${icon('power')}${S.killSwitch ? 'Resume renewals' : 'Emergency stop'}</button></div>`;
     $('#banners').innerHTML = S.killSwitch ? `<div class="banner">${icon('power')}<div><b>Emergency stop is active.</b> All renewals and deployments are frozen. Scans and reports still work.</div></div>` : '';
@@ -158,31 +157,25 @@
       const months = []; for (let i = 0; i < 12; i++) { const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + i, 1)); months.push({ key: d.toISOString().slice(0, 7), label: d.toLocaleString('en', { month: 'short', timeZone: 'UTC' }), n: 0 }); }
       let past = 0; S.certs.forEach(c => { const k = new Date(c.notAfter).toISOString().slice(0, 7), m = months.find(x => x.key === k); if (m) m.n++; else if (c.notAfter < Date.now()) past++; });
       const maxM = Math.max(1, ...months.map(m => m.n));
-      const byType = count(S.certs, c => c.type), byOs = count(S.certs, c => { const s = srv(c.serverId); return s.tech === 'java_keystore' ? 'Java keystore' : s.os === 'windows' ? 'Windows' : 'Linux'; }), bySrc = count(S.certs, c => c.managed ? c.source : 'Unmanaged');
-      const maxW = Math.max(...S.weekly.map(x => x.ok + x.failed + x.rolled));
+      const byType = count(S.certs, c => c.type), byOs = count(S.certs, c => { const s = srv(c.serverId); return s.tech === 'java_keystore' ? 'Java keystore' : s.os === 'windows' ? 'Windows' : 'Linux'; });
       const attention = S.certs.filter(c => status(c) === 'expired' || c.state === 'Failed' || c.state === 'Review' || (!c.managed && isDue(c))).sort((a, b) => a.notAfter - b.notAfter).slice(0, 8);
-      const events = S.audit.slice(-8).reverse(), lastRun = S.audit.slice().reverse().find(e => e.type === 'run.finished');
+      const events = S.audit.slice(-5).reverse(), lastRun = S.audit.slice().reverse().find(e => e.type === 'run.finished');
       const next = new Date(); next.setHours(S.schedule.hour, 0, 0, 0); if (next < new Date()) next.setDate(next.getDate() + 1);
       const mins = Math.round((next - new Date()) / 60000);
-      const renewed30 = S.certs.reduce((n, c) => n + c.history.filter(h => Date.now() - h.at < 30 * DAY).length, 0);
       return `
       <div class="card hero"><div><h2>Certificate compliance at a glance</h2><p>Monitor lifecycle health, find expiring assets across every server, and renew, deploy and roll back without leaving this screen.</p>
         <div class="meta">Scope: <b>${S.servers.length} servers</b> · Renewal window: <b>${w} days</b> · Generated: <b>${fmtDT(Date.now())} UTC</b></div>
-        <div class="row" style="margin-top:18px"><button class="btn primary" data-act="run-now">${icon('play')}Run renewal pipeline</button><button class="btn" data-act="dry-run">Dry run</button><button class="btn" data-act="nav" data-v="scan">${icon('radar')}Scan a server</button></div></div>
+        <div class="row" style="margin-top:18px"><button class="btn primary" data-act="run-now">${icon('play')}Run renewal pipeline</button></div></div>
         <div class="donut-wrap">${donut([{ v: st.valid, c: 'var(--green)' }, { v: st.expiring, c: 'var(--amber)' }, { v: st.expired, c: 'var(--red)' }], 190, 24, `${st.total}<small>CERTIFICATES</small>`)}
         <div class="legend"><div><span class="sw" style="background:var(--green)"></span>Valid<b>${st.valid}</b></div><div><span class="sw" style="background:var(--amber)"></span>Expiring<b>${st.expiring}</b></div><div><span class="sw" style="background:var(--red)"></span>Expired<b>${st.expired}</b></div><div class="muted" style="margin-top:6px">${Math.round(st.valid / st.total * 100)}% compliant</div></div></div></div>
       <div class="kpis">${kpi('Total discovered', st.total, 'var(--cyan)', `${S.servers.length} servers scanned`, 'all')}${kpi('Valid', st.valid, 'var(--green)', 'outside the renewal window', 'valid')}${kpi('Expiring soon', st.expiring, 'var(--amber)', `within ${w} days`, 'expiring')}${kpi('Expired', st.expired, 'var(--red)', 'needs immediate action', 'expired')}</div>
-      <div class="kpis">${kpi('Managed by CDM', st.managed, 'var(--purple)', 'auto-renewed', 'managed', 1)}${kpi('Due now', st.due, 'var(--blue)', 'ready for the next run', 'due', 1)}${kpi('Renewed (30 days)', renewed30, 'var(--green)', 'deployed and confirmed', null, 1)}${kpi('Pending approval', st.review, 'var(--amber)', 'human decision needed', 'review', 1)}${kpi('Failed / blocked', st.failed + (st.unmanagedDue), 'var(--red)', 'failed renewals + unmanaged due', 'attention', 1)}</div>
-      <div class="grid g2"><div class="card"><h3>Expiry forecast · next 12 months</h3><div class="sub">Click a month to list those certificates${past ? ` · ${past} already expired` : ''}</div>
-        <div class="bars">${months.map((m, i) => `<button class="b" data-act="month" data-k="${m.key}" title="${m.n} expiring in ${m.label}"><span class="v">${m.n}</span><div class="col" style="height:${m.n / maxM * 78 + 2}%;--c:${i === 0 ? 'var(--amber)' : 'var(--blue)'}"></div><small>${m.label}</small></button>`).join('')}</div></div>
-        <div class="card"><h3>Renewal outcomes · last 12 weeks</h3><div class="sub"><span class="sw" style="background:var(--green);display:inline-block"></span> success &nbsp;<span class="sw" style="background:var(--amber);display:inline-block"></span> rolled back &nbsp;<span class="sw" style="background:var(--red);display:inline-block"></span> failed</div>
-        <div class="bars">${S.weekly.map((x, i) => { const t = x.ok + x.failed + x.rolled; return `<div class="b" title="Week ${i + 1}: ${x.ok} ok, ${x.rolled} rolled back, ${x.failed} failed"><span class="v">${t}</span><div class="stack" style="height:${t / maxW * 78 + 2}%"><div style="height:${x.ok / t * 100}%;background:var(--green)"></div><div style="height:${x.rolled / t * 100}%;background:var(--amber)"></div><div style="height:${x.failed / t * 100}%;background:var(--red)"></div></div><small>W${i + 1}</small></div>`; }).join('')}</div></div></div>
-      <div class="grid g3"><div class="card"><h3>By certificate type</h3><div class="sub">DV is renewed automatically via ACME</div>${['DV', 'OV', 'EV'].map(k => hbar(k, byType[k] || 0, st.total, k === 'DV' ? 'var(--cyan)' : k === 'OV' ? 'var(--purple)' : 'var(--amber)')).join('')}</div>
-        <div class="card"><h3>By platform</h3><div class="sub">One pipeline, three technologies</div>${Object.entries(byOs).map(([k, v]) => hbar(k, v, st.total, k === 'Linux' ? 'var(--green)' : k === 'Windows' ? 'var(--blue)' : 'var(--amber)')).join('')}</div>
-        <div class="card"><h3>By renewal source</h3><div class="sub">Who supplies the replacement</div>${Object.entries(bySrc).map(([k, v]) => hbar(k, v, st.total, k === 'ACME' ? 'var(--green)' : k === 'Folder' ? 'var(--purple)' : 'var(--faint)')).join('')}</div></div>
+      <div class="grid g21"><div class="card"><h3>Expiry forecast · next 12 months</h3><div class="sub">Click a month to list those certificates${past ? ` · ${past} already expired` : ''}</div>
+        <div class="bars">${months.map((m, i) => `<button class="b" data-act="month" data-k="${m.key}" title="${m.n} expiring in ${m.label}"><span class="v">${m.n}</span><div class="col" style="height:${m.n / maxM * 78 + 2}%;--c:${i === 0 ? 'var(--amber)' : 'var(--blue)'}"></div><small>${m.label}</small></button>`).join('')}</div></div>
+        <div class="grid" style="align-content:stretch;grid-template-rows:1fr 1fr"><div class="card"><h3>By certificate type</h3><div class="sub">DV is renewed automatically via ACME</div>${['DV', 'OV', 'EV'].map(k => hbar(k, byType[k] || 0, st.total, k === 'DV' ? 'var(--cyan)' : k === 'OV' ? 'var(--purple)' : 'var(--amber)')).join('')}</div>
+        <div class="card"><h3>By platform</h3><div class="sub">One pipeline, three technologies</div>${Object.entries(byOs).map(([k, v]) => hbar(k, v, st.total, k === 'Linux' ? 'var(--green)' : k === 'Windows' ? 'var(--blue)' : 'var(--amber)')).join('')}</div></div></div>
       <div class="grid g21"><div class="card"><h3>Needs attention</h3><div class="sub">Expired, failed, awaiting approval, or unmanaged and due</div>
         <div class="tablewrap" style="border:0"><table><thead><tr><th>Certificate</th><th>Server</th><th>Expires</th><th>Why</th><th></th></tr></thead><tbody>${attention.map(c => `<tr class="clickable" data-act="cert" data-id="${c.id}"><td><div class="cn">${esc(c.cn)}</div></td><td>${esc(srv(c.serverId).name)}</td><td class="nowrap">${statusPill(c)} ${Math.round(dleft(c))}d</td><td class="muted">${esc(c.state === 'Failed' ? c.lastError : c.state === 'Review' ? 'awaiting approval' : status(c) === 'expired' ? 'expired' : 'not managed: ' + (inel(c) || 'run enrolment'))}</td><td><button class="btn sm">Open</button></td></tr>`).join('') || '<tr><td colspan="5" class="empty">Nothing needs attention.</td></tr>'}</tbody></table></div></div>
-        <div class="grid" style="align-content:start"><div class="card"><h3>Scheduled run</h3><div class="sub">${S.schedule.enabled ? `Daily at ${String(S.schedule.hour).padStart(2, '0')}:00 · next in ${Math.floor(mins / 60)} h ${mins % 60} min` : 'Schedule is paused'}</div>
+        <div class="grid" style="grid-template-rows:auto 1fr"><div class="card"><h3>Scheduled run</h3><div class="sub">${S.schedule.enabled ? `Daily at ${String(S.schedule.hour).padStart(2, '0')}:00 · next in ${Math.floor(mins / 60)} h ${mins % 60} min` : 'Schedule is paused'}</div>
           <div class="muted" style="font-size:.88rem">Last run: ${lastRun ? `${rel(lastRun.ts)} · exit ${lastRun.detail.exit ?? 0}` : '—'}</div><div class="row" style="margin-top:12px"><button class="btn sm" data-act="toggle-schedule">${S.schedule.enabled ? 'Pause schedule' : 'Resume schedule'}</button></div></div>
           <div class="card"><h3>Recent activity</h3><div class="sub">Hash-chained audit trail</div><ul class="tl">${events.map(e => `<li style="--c:${/failed|tamper/.test(e.type) ? 'var(--red)' : /rollback/.test(e.type) ? 'var(--amber)' : 'var(--green)'}"><b>${esc(e.type)}</b> <span class="muted">${esc(e.target)}</span><br><span class="faint">${rel(e.ts)}</span></li>`).join('')}</ul></div></div></div>`;
     },
@@ -219,7 +212,7 @@
       const can = c.managed && !c.paused && c.state !== 'Review' && isDue(c);
       return `<tr class="clickable" data-act="cert" data-id="${c.id}"><td>${statusPill(c)}</td><td><div class="cn">${esc(c.cn)}</div><div class="sub">${c.san.length > 1 ? c.san.length + ' names · ' : ''}${esc(c.ca)}</div></td><td>${esc(s.name)}<div class="sub">${esc(s.zone)} · ${esc(s.tech.replace('_', ' '))}</div></td><td>${pill(c.type, c.type === 'DV' ? 'cyan' : c.type === 'OV' ? 'purple' : 'amber')}</td>
         <td class="nowrap">${fmtDate(c.notAfter)}<div class="bar" style="margin-top:5px"><i style="width:${pct}%;--c:${col}"></i></div><div class="sub">${d < 0 ? 'expired ' + Math.round(-d) + 'd ago' : Math.round(d) < 1 ? 'expires today' : Math.round(d) + (Math.round(d) === 1 ? ' day left' : ' days left')}</div></td><td>${statePill(c)}</td>
-        <td class="nowrap"><button class="btn sm primary" data-act="renew" data-id="${c.id}" ${can && !S.killSwitch ? '' : 'disabled'} title="${can ? 'Renew this certificate now' : 'Not renewable right now (not due, paused, awaiting approval or unmanaged)'}">Renew</button> <button class="btn sm" data-act="${c.paused ? 'resume' : 'pause'}" data-id="${c.id}" ${c.managed ? '' : 'disabled'}>${c.paused ? 'Resume' : 'Pause'}</button></td></tr>`;
+        <td class="nowrap right"><button class="btn sm primary" data-act="renew" data-id="${c.id}" ${can && !S.killSwitch ? '' : 'disabled'} title="${can ? 'Renew this certificate now' : 'Not renewable right now (not due, paused, awaiting approval or unmanaged)'}">Renew</button> <button class="btn sm" data-act="${c.paused ? 'resume' : 'pause'}" data-id="${c.id}" ${c.managed ? '' : 'disabled'}>${c.paused ? 'Resume' : 'Pause'}</button></td></tr>`;
     }).join('') || '<tr><td colspan="7" class="empty">No certificates match these filters.</td></tr>';
     $('#cert-more').style.display = list.length > F.limit ? '' : 'none';
     $('#cert-more').textContent = `Show ${Math.min(60, list.length - F.limit)} more`;
@@ -227,15 +220,15 @@
   const opt = (v, t, cur) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${t}</option>`;
   A.views.certificates = {
     render() {
-      return `<div class="toolbar"><input class="input grow" id="f-q" placeholder="Search common name, thumbprint, serial, server or job ID…" value="${esc(F.q)}">
+      return `<div class="card ap-card"><div class="toolbar flat"><input class="input grow" id="f-q" placeholder="Search common name, thumbprint, serial, server or job ID…" value="${esc(F.q)}">
         <select class="input" data-f="status">${opt('', 'All statuses', F.status)}${opt('valid', 'Valid', F.status)}${opt('expiring', 'Expiring', F.status)}${opt('expired', 'Expired', F.status)}</select>
         <select class="input" data-f="state">${opt('', 'All states', F.state)}${['Managed', 'Due', 'Discovered', 'Unmanaged', 'Review', 'Failed', 'Paused'].map(x => opt(x, x === 'Due' ? 'Due for renewal' : x, F.state)).join('')}</select>
         <select class="input" data-f="type">${opt('', 'All types', F.type)}${opt('DV', 'DV', F.type)}${opt('OV', 'OV', F.type)}${opt('EV', 'EV', F.type)}</select>
         <select class="input" data-f="os">${opt('', 'All platforms', F.os)}${opt('linux', 'Linux', F.os)}${opt('windows', 'Windows', F.os)}${opt('java', 'Java keystore', F.os)}</select>
         <select class="input" data-f="zone">${opt('', 'All zones', F.zone)}${[...new Set(S.servers.map(s => s.zone))].map(z => opt(z, z, F.zone)).join('')}</select>
-        ${F.month ? `<span class="pill amber">Expiring ${F.month}</span>` : ''}<button class="btn" data-act="reset-filters">Reset</button><button class="btn" data-act="export-certs">${icon('download')}Export CSV</button><span class="muted" id="cert-count"></span></div>
-        <div class="tablewrap"><table><thead><tr><th>Status</th><th class="sort" data-act="sort" data-k="cn">Certificate ↕</th><th class="sort" data-act="sort" data-k="server">Server ↕</th><th class="sort" data-act="sort" data-k="type">Type ↕</th><th class="sort" data-act="sort" data-k="days">Expires ↕</th><th>CDM state</th><th>Actions</th></tr></thead><tbody id="cert-body"></tbody></table></div>
-        <div style="text-align:center"><button class="btn" id="cert-more" data-act="more">Show more</button></div>`;
+        ${F.month ? `<span class="pill amber">Expiring ${F.month}</span>` : ''}<button class="btn" data-act="reset-filters">Reset</button><button class="btn" data-act="export-certs">${icon('download')}Export CSV</button></div>
+        <div class="tablewrap flat"><table><thead><tr><th>Status</th><th class="sort" data-act="sort" data-k="cn">Certificate ↕</th><th class="sort" data-act="sort" data-k="server">Server ↕</th><th class="sort" data-act="sort" data-k="type">Type ↕</th><th class="sort" data-act="sort" data-k="days">Expires ↕</th><th>CDM state</th><th class="right">Actions</th></tr></thead><tbody id="cert-body"></tbody></table></div>
+        <div class="ap-foot row spread"><span class="muted" id="cert-count"></span><button class="btn sm" id="cert-more" data-act="more">Show more</button></div></div>`;
     },
     after() {
       certRows();
@@ -323,13 +316,78 @@
 
   // ------------------------------------------------------------------ approvals
   const REVIEW_TEXT = { approval: ['Approval required', 'Policy requires a human approver before an OV/EV certificate is replaced.', 'Approve & renew'], downgrade: ['Type downgrade blocked', 'The replacement candidate is DV but the current certificate is EV. CDM refuses a validation-level downgrade.', 'Override guard & renew'], ambiguous: ['Ambiguous match', 'Two equally valid replacements were found in input_certificates/. Pick one to continue.', 'Choose candidate A & renew'] };
+  const AP = { q: '', type: '', zone: '', server: '', status: '', sel: new Set() };
+  const apItems = () => {
+    const q = AP.q.trim().toLowerCase();
+    return S.certs.filter(c => {
+      if (c.state !== 'Review') return false; const s = srv(c.serverId);
+      if (AP.type && c.type !== AP.type) return false;
+      if (AP.zone && s.zone !== AP.zone) return false;
+      if (AP.server && s.id !== AP.server) return false;
+      if (AP.status && (c.review || 'approval') !== AP.status) return false;
+      return !q || (c.cn + ' ' + c.san.join(' ') + ' ' + s.name + ' ' + s.host + ' ' + c.id).toLowerCase().includes(q);
+    }).sort((a, b) => a.notAfter - b.notAfter);
+  };
+  const REASON_COLOR = { approval: 'amber', downgrade: 'red', ambiguous: 'purple' };
+  function apList() {
+    const all = S.certs.filter(c => c.state === 'Review'), items = apItems();
+    for (const id of [...AP.sel]) if (!all.some(c => c.id === id)) AP.sel.delete(id);
+    const nSel = items.filter(c => AP.sel.has(c.id)).length;
+    $('#ap-count').textContent = `Showing ${items.length} of ${all.length} pending`;
+    $('#ap-all').checked = items.length > 0 && nSel === items.length; $('#ap-all').indeterminate = nSel > 0 && nSel < items.length; $('#ap-all').disabled = !items.length;
+    $('#ap-bulk').className = 'bulkbar' + (nSel ? ' on' : '');
+    $('#ap-bulk').innerHTML = `<b>${nSel} selected</b><span class="muted">Apply a decision to all selected items</span><span style="flex:1"></span><button class="btn sm primary" data-act="ap-bulk" data-do="approve">Approve selected</button><button class="btn sm danger" data-act="ap-bulk" data-do="reject">Reject selected</button><button class="btn sm" data-act="ap-desel">Clear selection</button>`;
+    for (const k of ['approval', 'downgrade', 'ambiguous']) { const n = $('#ap-n-' + k); if (n) n.textContent = all.filter(c => (c.review || 'approval') === k).length; }
+    $('#ap-body').innerHTML = items.map(c => {
+      const t = REVIEW_TEXT[c.review || 'approval'], s = srv(c.serverId), d = Math.round(dleft(c));
+      return `<tr class="${AP.sel.has(c.id) ? 'sel' : ''}"><td class="chk"><input type="checkbox" class="ap-chk" data-id="${c.id}" ${AP.sel.has(c.id) ? 'checked' : ''} aria-label="Select ${esc(c.cn)}"></td>
+        <td><button class="linkbtn cn" data-act="cert" data-id="${c.id}">${esc(c.cn)}</button><div class="sub">${pill(c.type, c.type === 'EV' ? 'amber' : c.type === 'OV' ? 'purple' : 'cyan')} <span style="margin-left:4px">${esc(c.ca)}</span></div></td>
+        <td>${esc(s.name)}<div class="sub">${esc(s.zone)} · ${esc(s.host)}</div></td>
+        <td>${pill(t[0], REASON_COLOR[c.review || 'approval'])}<div class="sub reason">${t[1]}</div></td>
+        <td class="nowrap">${fmtDate(c.notAfter)}<div class="sub">${d < 0 ? 'expired ' + (-d) + 'd ago' : d + (d === 1 ? ' day left' : ' days left')}</div></td>
+        <td class="nowrap right"><button class="btn sm primary" data-act="approve" data-id="${c.id}" data-now="1" title="${esc(t[2])}">Approve &amp; renew</button> <button class="btn sm" data-act="approve" data-id="${c.id}" title="Approve now, renew on the next run">Approve</button> <button class="btn sm danger" data-act="reject" data-id="${c.id}">Reject</button></td></tr>`;
+    }).join('') || `<tr><td colspan="6" class="empty">${all.length ? 'No pending items match these filters.' : 'The review queue is empty. Nothing is waiting for a decision.'}</td></tr>`;
+  }
   A.views.approvals = {
     render() {
-      const items = S.certs.filter(c => c.state === 'Review');
-      return `<div class="card"><h3>Approvals & review queue</h3><div class="sub">CDM never guesses. Anything risky waits here for a person, and every decision is written to the audit trail.</div></div>
-        ${items.map(c => { const t = REVIEW_TEXT[c.review || 'approval']; return `<div class="card"><div class="row spread"><div><div class="row">${pill(t[0], 'amber')}${pill(c.type, c.type === 'EV' ? 'amber' : 'purple')}</div><h3 style="margin-top:8px;word-break:break-all">${esc(c.cn)}</h3><div class="muted">${esc(srv(c.serverId).name)} · ${esc(srv(c.serverId).zone)} · expires ${fmtDate(c.notAfter)} (${Math.round(dleft(c))} days)</div><p>${t[1]}</p></div>
-          <div class="row"><button class="btn primary" data-act="approve" data-id="${c.id}" data-now="1">${esc(t[2])}</button><button class="btn good" data-act="approve" data-id="${c.id}">Approve only</button><button class="btn danger" data-act="reject" data-id="${c.id}">Reject</button><button class="btn" data-act="cert" data-id="${c.id}">Details</button></div></div></div>`; }).join('') || '<div class="card empty">The review queue is empty. Nothing is waiting for a decision.</div>'}`;
+      const pend = S.certs.filter(c => c.state === 'Review');
+      const sv = [...new Map(pend.map(c => [c.serverId, srv(c.serverId)])).values()], zones = [...new Set(pend.map(c => srv(c.serverId).zone))];
+      const tile = (k, lbl, color) => `<button class="kpi small ${AP.status === k ? 'active' : ''}" style="--c:var(--${color})" data-act="ap-quick" data-k="${k}"><div class="lbl">${lbl}</div><div class="num" id="ap-n-${k}">0</div></button>`;
+      return `<div class="card"><h3>Approvals & review queue</h3><div class="sub" style="margin-bottom:0">CDM never guesses. Anything risky waits here for a person, and every decision is written to the audit trail.</div></div>
+        <div class="kpis">${tile('approval', 'Approval required', 'amber')}${tile('downgrade', 'Type downgrade blocked', 'red')}${tile('ambiguous', 'Ambiguous match', 'purple')}</div>
+        <div class="card ap-card">
+          <div class="toolbar flat"><input class="input grow" id="ap-q" placeholder="Search certificate, server or host…" value="${esc(AP.q)}">
+            <select class="input" data-ap="type">${opt('', 'All types', AP.type)}${opt('OV', 'OV', AP.type)}${opt('EV', 'EV', AP.type)}${opt('DV', 'DV', AP.type)}</select>
+            <select class="input" data-ap="zone">${opt('', 'All zones', AP.zone)}${zones.map(z => opt(z, z, AP.zone)).join('')}</select>
+            <select class="input" data-ap="server">${opt('', 'All servers', AP.server)}${sv.map(x => opt(x.id, x.name, AP.server)).join('')}</select>
+            <select class="input" data-ap="status">${opt('', 'All statuses', AP.status)}${Object.entries(REVIEW_TEXT).map(([k, t]) => opt(k, t[0], AP.status)).join('')}</select>
+            <button class="btn sm" data-act="ap-clear">Reset</button></div>
+          <div id="ap-bulk" class="bulkbar"></div>
+          <div class="tablewrap flat"><table><thead><tr><th class="chk"><input type="checkbox" id="ap-all" aria-label="Select all"></th><th>Certificate</th><th>Server</th><th>Reason</th><th>Expires</th><th class="right">Decision</th></tr></thead><tbody id="ap-body"></tbody></table></div>
+          <div class="ap-foot muted" id="ap-count"></div>
+        </div>`;
     },
+    after() {
+      apList();
+      $('#ap-q').addEventListener('input', e => { AP.q = e.target.value; apList(); });
+      $('#ap-all').addEventListener('change', e => { apItems().forEach(c => e.target.checked ? AP.sel.add(c.id) : AP.sel.delete(c.id)); apList(); });
+      $('#ap-body').addEventListener('change', e => { if (e.target.classList.contains('ap-chk')) { e.target.checked ? AP.sel.add(e.target.dataset.id) : AP.sel.delete(e.target.dataset.id); apList(); } });
+    },
+  };
+  A.handlers['ap-quick'] = el => { AP.status = AP.status === el.dataset.k ? '' : el.dataset.k; A.renderView(); };
+  A.handlers['ap-desel'] = () => { AP.sel.clear(); apList(); };
+  A.handlers['ap-clear'] = () => { Object.assign(AP, { q: '', type: '', zone: '', server: '', status: '' }); A.renderView(); };
+  A.handlers['ap-bulk'] = el => {
+    const act = el.dataset.do, list = apItems().filter(c => AP.sel.has(c.id)); if (!list.length) return;
+    const risky = list.filter(c => c.review === 'downgrade' || c.review === 'ambiguous').length;
+    const verb = act === 'approve' ? 'Approve' : 'Reject';
+    A.confirm({ title: `${verb} ${list.length} certificate${list.length > 1 ? 's' : ''}?`, danger: act === 'reject' || risky > 0, label: `${verb} ${list.length}`,
+      body: (act === 'approve' ? 'Selected certificates are approved for renewal on the next run (no renewal starts now).' : 'Renewal is paused for the selected certificates.')
+        + (act === 'approve' && risky ? `<br><b>${risky}</b> of them are type-downgrade or ambiguous-match items that will be overridden. Review them individually if unsure.` : ''),
+      onYes: () => {
+        list.forEach(c => { if (act === 'approve') { c.approved = true; c.state = 'Managed'; delete c.review; A.audit('approval.granted', c.cn, { by: S.settings.actor, bulk: true }); } else { c.state = 'Managed'; c.paused = true; c.pauseReason = 'Rejected by ' + S.settings.actor; delete c.review; A.audit('approval.rejected', c.cn, { bulk: true }); } });
+        list.forEach(c => AP.sel.delete(c.id)); toast(`${verb}d ${list.length} certificate${list.length > 1 ? 's' : ''}`, act === 'approve' ? 'ok' : 'warn'); A.closeLayer(); A.renderView(); A.ui();
+      } });
   };
   A.handlers.approve = el => {
     const c = certById(el.dataset.id); if (!c) return; c.approved = true; c.state = 'Managed'; delete c.review; A.audit('approval.granted', c.cn, { by: S.settings.actor });
@@ -400,7 +458,8 @@
   });
   document.addEventListener('change', e => {
     const t = e.target;
-    if (t.dataset.f) { F[t.dataset.f] = t.value; F.limit = 60; if (A.view() === 'certificates') certRows(); }
+    if (t.dataset.ap) { AP[t.dataset.ap] = t.value; apList(); }
+    else if (t.dataset.f) { F[t.dataset.f] = t.value; F.limit = 60; if (A.view() === 'certificates') certRows(); }
     else if (t.dataset.au) { AU.type = t.value; auditRows(); }
     else if (t.dataset.range) { A.setSetting(t.dataset.range, +t.value); A.renderTop(); A.renderNav(); if (t.dataset.range === 'windowDays') { const st = stats(); $('#win-preview').textContent = `${st.due} managed certificates are due now · ${st.expiring} expiring overall`; A.audit('policy.changed', 'renewal.window_days', { to: +t.value }); } }
     else if (t.dataset.set) { A.setSetting(t.dataset.set, t.checked); A.audit('policy.changed', t.dataset.set, { to: t.checked }); toast(t.dataset.set + ': ' + (t.checked ? 'on' : 'off'), 'ok'); }
