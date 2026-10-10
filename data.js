@@ -79,7 +79,22 @@
   const BASES = { 'prod-eu': 'northwind-demo.com', 'prod-us': 'contoso-labs.net', dmz: 'fabrikam-demo.org', uat: 'tailspin-demo.io', dev: 'tailspin-demo.io' };
   const SUBS = ['www', 'portal', 'app', 'api', 'shop', 'mail', 'sso', 'crm', 'erp', 'pay', 'cdn', 'intra', 'hr', 'billing', 'status', 'docs', 'support', 'partners', 'vpn', 'auth', 'files', 'reports', 'booking', 'checkout'];
   const LAB = [['expired', -3], ['critical', 4], ['soon', 12], ['renew', 20], ['due', 29], ['edge', 30], ['ok', 45], ['later', 90], ['far', 200]];
+  // extra due certificates for the demo: [name, days left]. Negative = already expired.
+  const DEMO_LAB = [['demo-a', 2], ['demo-b', 9], ['demo-c', 17], ['demo-d', 25]];
+  const DEMO_DUE = [['login', -6], ['orders', -2], ['gateway', 1], ['metrics', 3], ['assets', 5], ['search', 7], ['notify', 9], ['invoices', 11], ['helpdesk', 13], ['careers', 15], ['events', 17], ['wiki', 19],
+    ['tickets', 21], ['git', 23], ['vault', 25], ['backup', 27], ['ldap', 28], ['proxy', 29], ['media', 2], ['news', 6], ['chat', 10], ['store', 14], ['track', 18], ['labs', 22]];
   const CAS = { DV: "Let's Encrypt R11", OV: 'DigiCert TLS RSA SHA256 2020 CA1', EV: 'Entrust Extended Validation CA - L1M' };
+  // Root and issuing CAs the automation setup offers. Nothing is selected to begin with: the user chooses which ones automation may renew from.
+  const CA_SETUP = {
+    roots: [{ id: 'R-ISRG', name: 'ISRG Root X1' }, { id: 'R-LESTG', name: '(STAGING) Pretend Pear X1' }, { id: 'R-DIGI', name: 'DigiCert Global Root CA' },
+      { id: 'R-ENTR', name: 'Entrust Root Certification Authority - G2' }, { id: 'R-NWIND', name: 'Northwind Internal Root CA' }, { id: 'R-FAB', name: 'Fabrikam Legacy Root CA' }],
+    issuers: [{ id: 'I-LER11', name: "Let's Encrypt R11", rootId: 'R-ISRG' }, { id: 'I-LER10', name: "Let's Encrypt R10", rootId: 'R-ISRG' }, { id: 'I-LESTG', name: "Let's Encrypt (staging)", rootId: 'R-LESTG' },
+      { id: 'I-DIGI', name: 'DigiCert TLS RSA SHA256 2020 CA1', rootId: 'R-DIGI' }, { id: 'I-DIGSS', name: 'DigiCert SHA2 Secure Server CA', rootId: 'R-DIGI' },
+      { id: 'I-ENTR', name: 'Entrust Extended Validation CA - L1M', rootId: 'R-ENTR' }, { id: 'I-ENL1K', name: 'Entrust Certification Authority - L1K', rootId: 'R-ENTR' },
+      { id: 'I-NWIND', name: 'Northwind Internal Issuing CA 01', rootId: 'R-NWIND' }, { id: 'I-NWIND2', name: 'Northwind Internal Issuing CA 02', rootId: 'R-NWIND' }, { id: 'I-FAB', name: 'Fabrikam Legacy Issuing CA 2019', rootId: 'R-FAB' }],
+    selRoots: [], selIssuers: [],
+  };
+  const OFF_CONFIG = [['Fabrikam Legacy Issuing CA 2019', 6], ['Northwind Internal Issuing CA 01', 11], ['Fabrikam Legacy Issuing CA 2019', 19], ['Northwind Internal Issuing CA 01', 24]];
   const REASON = {
     wildcard: 'wildcard (ACME HTTP-01 cannot issue wildcards)',
     multi: 'multi-name or SAN-less certificate (ACME source orders single-name certificates only)',
@@ -144,7 +159,7 @@
     // curated demo situations
     const find = (f) => certs.filter(f);
     const ovDue = find(c => c.managed && c.type !== 'DV' && !c.lab);
-    const reviews = [['approval', 9], ['approval', 17], ['downgrade', 12], ['ambiguous', 21]];
+    const reviews = [['downgrade', 12], ['ambiguous', 21]];
     reviews.forEach(([kind, days], i) => {
       const c = ovDue[i * 3]; if (!c) return;
       c.notAfter = now + days * DAY; c.notBefore = c.notAfter - 365 * DAY; c.state = 'Review'; c.review = kind;
@@ -188,13 +203,24 @@
       SERVERS.filter(s => !s.lab).slice(0, 3).forEach((s, k) => ev(ts + (k + 1) * 4000, 'discovery.scanned', s.name, SVC, { certificates: between(6, 11) }));
       ev(ts + 120000, 'run.finished', 'RUN-' + t.toISOString().slice(0, 10).replace(/-/g, ''), SVC, { problems: d === 3 ? 1 : 0, exit: d === 3 ? 2 : 0 });
     }
+    // due certificates of two internal CAs: they are shown and renewed only when the user selects those CAs in the automation setup
+    const spare = certs.filter(c => { const s = SERVERS.find(x => x.id === c.serverId); return !s.lab && !s.unreachable && c.managed && c.type === 'DV' && c.state === 'Managed' && !c.paused && !c.history.length; });
+    OFF_CONFIG.forEach(([ca, days], i) => {
+      const c = spare[spare.length - 1 - i]; if (!c) return;
+      c.ca = ca; c.source = ca.startsWith('Northwind') ? 'Manual' : 'ACME'; c.notAfter = now + days * DAY; c.notBefore = c.notAfter - 90 * DAY;
+    });
     ev(now - 30 * HOUR, 'policy.changed', 'renewal.window_max_days', HUMAN, { from: 45, to: 30 });
     ev(now - 52 * HOUR, 'approval.granted', 'ovcert', HUMAN, { reason: 'Quarterly OV replacement approved (CHG0087611)' });
     events.sort((a, b) => a.ts - b.ts);
 
     const weekly = Array.from({ length: 12 }, (_, i) => ({ ok: between(9, 34) + i, failed: between(0, 2), rolled: between(0, 2) }));
+    // More certificates that are due and not renewed yet, so there is plenty to start a journey for: managed, on reachable servers,
+    // never renewed, spread over every platform, type and zone. Added last so the rest of the sample estate stays as it was.
+    SERVERS.filter(s => s.lab).forEach(s => { const ip = s.host.replace(/\./g, '-'); DEMO_LAB.forEach(([label, days]) => add({ s, cn: label + '-' + ip + '.nip.io', label, type: 'DV', daysLeft: days, lab: true, managed: true })); });
+    const hosts = SERVERS.filter(s => !s.lab && !s.unreachable);
+    DEMO_DUE.forEach(([sub, days], i) => { const s = hosts[i % hosts.length], type = i % 12 === 9 ? 'EV' : i % 6 === 4 ? 'OV' : 'DV'; add({ s, cn: sub + '.' + BASES[s.zone], label: sub, type, daysLeft: days, managed: true }); });
     return { servers: SERVERS.map(s => ({ ...s })), certs, jobs: jobs.sort((a, b) => b.startedAt - a.startedAt), backups, events, weekly };
   }
 
-  window.CDM_DATA = { sha256, eventHash, buildSeed, rng, DAY, HOUR, REASON, CAS };
+  window.CDM_DATA = { sha256, eventHash, buildSeed, rng, DAY, HOUR, REASON, CAS, CA_SETUP };
 })();

@@ -1,7 +1,7 @@
 /* CDM prototype - core: state, shared UI, and the dashboard / certificates / jobs / approvals / audit / policy views. */
 (function () {
   'use strict';
-  const D = window.CDM_DATA, DAY = D.DAY, HOUR = D.HOUR, KEY = 'cdm-prototype-v1';
+  const D = window.CDM_DATA, DAY = D.DAY, HOUR = D.HOUR, KEY = 'cdm-prototype-v9';
   const A = window.CDM_APP = { D, views: {}, handlers: {}, RUN: null, SC: null, live: new Set() };
   const $ = (s, r = document) => r.querySelector(s);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -9,28 +9,48 @@
   Object.assign(A, { $, esc, uid });
 
   // ------------------------------------------------------------------ state
-  const DEFAULTS = { windowDays: 30, maxPerRun: 25, maxParallel: 5, canary: true, stopOnFailure: true, approveOvEv: true, autoEnrol: true,
+  const DEFAULTS = { windowDays: 30, maxPerRun: 25, maxParallel: 5, canary: true, stopOnFailure: true, approveOvEv: false, autoEnrol: true,
     autoInstallAdapter: true, acmeEnv: 'staging', speed: 'normal', failNext: false, caOutage: false, actor: 'a.sharma@pki-ops' };
   function pushEvent(s, e) {
     const prev = s.audit.length ? s.audit[s.audit.length - 1].hash : '0'.repeat(64);
     const ev = { seq: s.audit.length + 1, ts: e.ts, type: e.type, target: e.target, actor: e.actor, detail: e.detail || {}, prev };
     ev.hash = D.eventHash(prev, ev); s.audit.push(ev); return ev;
   }
+  // Error table: one row per distinct problem. The same open problem seen again only raises its count.
+  function addError(s, e) {
+    const same = s.errors.find(x => x.status === 'open' && x.code === e.code && x.step === (e.step || '') && x.certId === (e.certId || null) && x.serverId === (e.serverId || null));
+    if (same) { same.count++; same.lastSeen = e.ts; same.message = e.message; same.runId = e.runId || same.runId; same.jobId = e.jobId || same.jobId; same.outcome = e.outcome || same.outcome; return same; }
+    s.errSeq = (s.errSeq || 0) + 1;
+    const rec = { id: 'ERR-' + String(s.errSeq).padStart(5, '0'), ts: e.ts, lastSeen: e.ts, count: e.count || 1, status: 'open', severity: e.severity || 'error', stage: e.stage, step: e.step || '', code: e.code, message: e.message,
+      certId: e.certId || null, cn: e.cn || '', serverId: e.serverId || null, runId: e.runId || '', jobId: e.jobId || '', outcome: e.outcome || '', resolvedAt: null, resolvedBy: null, note: '' };
+    s.errors.unshift(rec); if (s.errors.length > 400) s.errors.length = 400; return rec;
+  }
+  function seedErrors(s, seed) {
+    const now = Date.now(), last = new Date(now - DAY); last.setHours(2, 0, 4, 0);
+    seed.jobs.filter(j => j.state === 'Rolled back').forEach(j => { const r = addError(s, { ts: j.endedAt, stage: 'Deploy', step: 'activate', code: 'ACTIVATE_FAILED', message: j.error, certId: j.certId, cn: j.cn, serverId: j.serverId, runId: j.run, jobId: j.id, outcome: 'Rolled back automatically; old certificate verified' });
+      Object.assign(r, { status: 'resolved', resolvedAt: j.endedAt + 3 * HOUR, resolvedBy: DEFAULTS.actor, note: 'Service configuration corrected; renewed on the next run.' }); });
+    seed.servers.filter(x => x.status === 'unreachable').forEach(x => { addError(s, { ts: last.getTime() - 6 * DAY, stage: 'Discover', step: 'scan', code: 'SCAN_UNREACHABLE', message: x.error, serverId: x.id, runId: 'RUN-' + last.toISOString().slice(0, 10).replace(/-/g, ''), outcome: 'Server skipped; nothing changed', count: 7 }).lastSeen = last.getTime(); });
+    seed.certs.filter(c => c.state === 'Failed').forEach(c => addError(s, { ts: now - 26 * HOUR, stage: 'Landing', step: 'order', code: 'ACME_VALIDATION_FAILED', message: c.lastError, certId: c.id, cn: c.cn, serverId: c.serverId, outcome: 'No certificate issued; server unchanged' }));
+  }
   function fresh() {
     const seed = D.buildSeed();
-    const s = { v: 1, theme: 'dark', servers: seed.servers, certs: seed.certs, jobs: seed.jobs, backups: seed.backups, weekly: seed.weekly,
-      audit: [], settings: { ...DEFAULTS }, killSwitch: false, schedule: { enabled: true, hour: 2 },
+    const s = { v: 9, setup: { done: false, completedAt: null, ...JSON.parse(JSON.stringify(D.CA_SETUP)) }, errors: [], errSeq: 0, journeys: {}, theme: 'dark', servers: seed.servers, certs: seed.certs, jobs: seed.jobs, backups: seed.backups, weekly: seed.weekly,
+      audit: [], settings: { ...DEFAULTS }, killSwitch: false, schedule: { enabled: true, freq: 'daily', hour: 2, dow: 1, dom: 1 },
       db: { outage: false, pending: 0, rows: { certificates_seen: seed.certs.length * 14, audit_events: 0, deployment_jobs: seed.jobs.length, acme_issuance: 61 } } };
     seed.events.forEach(e => pushEvent(s, e)); s.db.rows.audit_events = s.audit.length;
+    seedErrors(s, seed); s.db.rows.pipeline_errors = s.errors.length;
     return s;
   }
-  function load() { try { const o = JSON.parse(localStorage.getItem(KEY)); return o && o.v === 1 ? o : null; } catch (e) { return null; } }
+  function load() { try { const o = JSON.parse(localStorage.getItem(KEY)); return o && o.v === 9 ? o : null; } catch (e) { return null; } }
   const S = A.S = load() || fresh();
   let saveT = 0;
   A.save = () => { clearTimeout(saveT); saveT = setTimeout(() => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { /* storage unavailable: demo still works */ } }, 150); };
-  A.reset = () => { try { localStorage.removeItem(KEY); } catch (e) { /* ignore */ } Object.keys(S).forEach(k => delete S[k]); Object.assign(S, fresh()); A.RUN = null; if (A.SC) Object.assign(A.SC, { running: false, results: null, errors: [], days: null, idx: -1, current: null }), A.SC.sel.clear(); A.render(); toast('Demo data reset to the original sample estate', 'ok'); };
+  A.reset = () => { try { localStorage.removeItem(KEY); } catch (e) { /* ignore */ } Object.keys(S).forEach(k => delete S[k]); Object.assign(S, fresh()); A.RUN = null; if (A.SC) Object.assign(A.SC, { running: false, results: null, errors: [], days: null, idx: -1, current: null }), A.SC.sel.clear(); if (A.J) A.J.reset(); if (A.W) A.W.reset(); A.render(); toast('Demo data reset to the original sample estate', 'ok'); };
 
   // ------------------------------------------------------------------ helpers
+  // Rebuild an element only when its content changed. A run asks for a redraw many times a second; replacing a
+  // button between mouse-down and mouse-up drops the click, which is why Stop sometimes needed several presses.
+  const put = A.put = (el, html) => { if (!el || el._h === html) return false; el.innerHTML = html; el._h = html; return true; };
   const srv = A.srv = id => S.servers.find(s => s.id === id);
   const certById = A.certById = id => S.certs.find(c => c.id === id);
   const dleft = A.dleft = c => (c.notAfter - Date.now()) / DAY;
@@ -46,6 +66,56 @@
   A.sleep = ms => { const f = { slow: .5, normal: 1, fast: 3, instant: 0 }[S.settings.speed]; return f ? new Promise(r => setTimeout(r, ms / f)) : Promise.resolve(); };
   A.dbWrite = (key, n = 1) => { if (S.db.outage) S.db.pending += n; else S.db.rows[key] = (S.db.rows[key] || 0) + n; };
   A.audit = (type, target, detail, actor) => { const ev = pushEvent(S, { ts: Date.now(), type, target, actor: actor || S.settings.actor, detail }); A.dbWrite('audit_events'); A.save(); return ev; };
+  // CA check: may CDM renew this certificate, judging by who issued it? `su` is the automation setup (or a draft of it).
+  A.caVerdict = (c, su = S.setup) => {
+    const issuer = su.issuers.find(i => i.name === c.ca);
+    if (!issuer) return { ok: false, code: 'CA_NOT_CONFIGURED', reason: `Issuing CA "${c.ca}" is not in the automation setup` };
+    const root = su.roots.find(r => r.id === issuer.rootId);
+    if (!su.selIssuers.includes(issuer.id)) return { ok: false, code: 'CA_NOT_SELECTED', issuer, root, reason: `Issuing CA "${issuer.name}" is not selected in the automation setup` };
+    if (!root || !su.selRoots.includes(root.id)) return { ok: false, code: 'CA_ROOT_NOT_SELECTED', issuer, root, reason: `Root CA "${root ? root.name : 'unknown'}" of issuing CA "${issuer.name}" is not selected in the automation setup` };
+    return { ok: true, issuer, root };
+  };
+  // Scope: once CAs are selected, CDM shows and renews only the certificates they issued; every other certificate is left out
+  // (not listed, not renewed, no error). With no selection yet (before setup, or after Terminate) the whole estate is listed.
+  A.scopeOn = () => S.setup.selIssuers.length > 0;
+  A.certs = () => (A.scopeOn() ? S.certs.filter(c => A.caVerdict(c).ok) : S.certs);
+  // Certificates a renewal would succeed for right now, by hand (Certificate journey) or in the next automation run:
+  // from a selected CA, managed, due, not paused, not waiting for a decision, on a server CDM can reach.
+  A.readyToRenew = () => (A.scopeOn() ? A.certs().filter(c => { const s = srv(c.serverId);
+    return c.managed && isDue(c) && !c.paused && c.state !== 'Review' && c.state !== 'Renewing' && !s.paused && s.status !== 'unreachable' && (c.type === 'DV' || !S.settings.approveOvEv || c.approved); }) : []);
+  // Test certificates that were renewed can be put back inside the renewal window, so there is something to renew again without
+  // resetting everything else. "Test certificates" are the ones the sample estate starts with as due.
+  let seedDue = null;
+  const seedLeft = () => seedDue || (seedDue = (now => Object.fromEntries(D.buildSeed().certs.filter(c => c.managed && c.state === 'Managed' && c.notAfter - now <= 30 * DAY).map(c => [c.id, [c.notAfter - now, c.notAfter - c.notBefore]])))(Date.now()));
+  const restorable = A.restorable = () => A.certs().filter(c => seedLeft()[c.id] && c.managed && !c.paused && c.state !== 'Renewing' && !isDue(c));
+  A.restoreDue = () => {
+    const list = restorable(), now = Date.now(); if (!list.length) return 0;
+    list.forEach(c => { const [left, life] = seedLeft()[c.id]; c.notAfter = now + left; c.notBefore = c.notAfter - life; c.state = 'Managed'; c.lastError = null; c.approved = false; });
+    A.audit('demo.certificates_due_again', 'test certificates', { certificates: list.length }); A.save(); A.render(); toast(`${list.length} test certificate${list.length === 1 ? ' is' : 's are'} inside the renewal window again`, 'ok'); return list.length;
+  };
+  // A small, varied sample of them for the demo: the lab servers first, then one per platform, then the most urgent.
+  A.demoCerts = (n = 6) => {
+    const all = A.readyToRenew().sort((a, b) => (srv(b.serverId).lab ? 1 : 0) - (srv(a.serverId).lab ? 1 : 0) || a.notAfter - b.notAfter), pick = [], techs = new Set();
+    all.forEach(c => { const t = srv(c.serverId).tech; if (pick.length < n && !techs.has(t)) { techs.add(t); pick.push(c); } });
+    all.forEach(c => { if (pick.length < n && !pick.includes(c)) pick.push(c); });
+    return pick;
+  };
+  // Schedule (all times UTC): text, next run, and how long until then.
+  A.DOW = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  A.scheduleText = (s = S.schedule) => { const t = String(s.hour).padStart(2, '0') + ':00 UTC'; return s.freq === 'weekly' ? `Every ${A.DOW[s.dow]} at ${t}` : s.freq === 'monthly' ? `Monthly on day ${s.dom} at ${t}` : `Daily at ${t}`; };
+  A.scheduleNext = (s = S.schedule) => {
+    const now = new Date(), d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), s.hour));
+    if (s.freq === 'monthly') { d.setUTCDate(s.dom); if (d <= now) d.setUTCMonth(d.getUTCMonth() + 1); return d; }
+    while (d <= now || (s.freq === 'weekly' && d.getUTCDay() !== s.dow)) d.setUTCDate(d.getUTCDate() + 1);
+    return d;
+  };
+  A.untilText = date => { const m = Math.max(0, Math.round((date - Date.now()) / 60000)); return m >= 2880 ? `in ${Math.floor(m / 1440)} d ${Math.floor(m % 1440 / 60)} h` : `in ${Math.floor(m / 60)} h ${m % 60} min`; };
+  A.recordError = e => {
+    const c = e.certId ? certById(e.certId) : null;
+    const rec = addError(S, { ts: Date.now(), cn: c ? c.cn : '', serverId: c ? c.serverId : null, runId: A.RUN ? A.RUN.id : '', ...e });
+    A.dbWrite('pipeline_errors'); A.audit('error.recorded', rec.id, { stage: rec.stage, code: rec.code, target: rec.cn || (rec.serverId || '') }); A.ui(); return rec;
+  };
+  A.resolveErrors = (match, by, note) => { let n = 0; S.errors.forEach(x => { if (x.status === 'open' && match(x)) { x.status = 'resolved'; x.resolvedAt = Date.now(); x.resolvedBy = by; x.note = note || x.note; n++; } }); if (n) A.save(); return n; };
   const icon = (n, cls = '') => `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n] || ''}</svg>`;
   const ICONS = {
     grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
@@ -60,6 +130,10 @@
     play: '<path d="M7 4l13 8-13 8z"/>', pause: '<path d="M8 5v14M16 5v14"/>', stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
     sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M5 19l1.5-1.5M17.5 6.5L19 5"/>',
     power: '<path d="M12 3v9"/><path d="M6.4 6.4a8 8 0 1011.2 0"/>', undo: '<path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 010 12h-3"/>',
+    key: '<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3M14 9l2 2"/>',
+    gear: '<circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="7.5"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8"/>',
+    route: '<circle cx="6" cy="19" r="2"/><circle cx="18" cy="5" r="2"/><path d="M8 19h7a3 3 0 000-6H9a3 3 0 010-6h7"/>',
+    alert: '<path d="M12 3l10 18H2z"/><path d="M12 10v5M12 18h.01"/>',
     download: '<path d="M12 4v11M7 11l5 5 5-5M4 20h16"/>', help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 114 2c-1 .8-1.5 1.2-1.5 2.5M12 17h.01"/>',
   };
   A.icon = icon;
@@ -68,7 +142,7 @@
   const STATE_PILL = { Managed: 'blue', Discovered: '', Review: 'amber', Failed: 'red', Renewing: 'cyan' };
   const statePill = A.statePill = c => c.paused ? pill('Paused', 'purple') : pill(c.state, STATE_PILL[c.state]);
   const statusPill = c => pill(...STATUS_PILL[status(c)]);
-  const JOB_PILL = s => pill(s, /^(Confirmed|Deployed)/.test(s) ? 'green' : /^Rolled/.test(s) ? 'amber' : /^(Failed)/.test(s) ? 'red' : /^(Running)/.test(s) ? 'cyan' : /^(Skipped|Cancelled)/.test(s) ? 'purple' : '');
+  const JOB_PILL = s => pill(s, /^(Confirmed|Deployed)/.test(s) ? 'green' : /^Rolled/.test(s) ? 'amber' : /^(Failed|Not confirmed)/.test(s) ? 'red' : /^(Running)/.test(s) ? 'cyan' : /^(Skipped|Cancelled)/.test(s) ? 'purple' : '');
   A.jobPill = JOB_PILL;
   const stepDots = (steps, order = ['precheck', 'backup', 'install', 'activate', 'verify']) => `<span class="steps" title="${order.map(k => k + ': ' + steps[k]).join(' · ')}">${order.map(k => `<i class="${steps[k]}"></i>`).join('')}</span>`;
   A.stepDots = stepDots;
@@ -100,7 +174,7 @@
 
   // ------------------------------------------------------------------ stats
   function stats() {
-    const c = S.certs, st = { total: c.length, valid: 0, expiring: 0, expired: 0, managed: 0, review: 0, failed: 0, paused: 0, due: 0, unmanagedDue: 0 };
+    const c = A.certs(), st = { total: c.length, valid: 0, expiring: 0, expired: 0, managed: 0, review: 0, failed: 0, paused: 0, due: 0, unmanagedDue: 0 };
     for (const x of c) {
       st[status(x)]++; if (x.managed) st.managed++; if (x.state === 'Review') st.review++; if (x.state === 'Failed') st.failed++; if (x.paused) st.paused++;
       if (x.managed && isDue(x) && !x.paused) st.due++; if (!x.managed && isDue(x)) st.unmanagedDue++;
@@ -111,33 +185,36 @@
   const count = (arr, f) => arr.reduce((m, x) => { const k = f(x); m[k] = (m[k] || 0) + 1; return m; }, {});
 
   // ------------------------------------------------------------------ chrome
-  const NAV = [['overview', 'Overview', 'grid'], ['certificates', 'Certificates', 'shield'], ['servers', 'Servers', 'server'], ['scan', 'Scan', 'radar'], ['pipeline', 'Renewal pipeline', 'flow'],
-    ['jobs', 'Jobs & rollback', 'history'], ['approvals', 'Approvals', 'check'], ['audit', 'Audit & compliance', 'link'], ['policies', 'Policies', 'sliders']];
+  const NAV = [['overview', 'Overview', 'grid'], ['certificates', 'Certificates', 'shield'], ['servers', 'Servers', 'server'], ['scan', 'Scan', 'radar'], ['setup', 'Automation setup', 'gear'],
+    ['journey', 'Certificate journey', 'route'], ['jobs', 'Jobs & rollback', 'history'], ['approvals', 'Approvals', 'check'], ['errors', 'Error table', 'alert'],
+    ['audit', 'Audit & compliance', 'link'], ['policies', 'Policies', 'sliders']];
   let view = 'overview';
   A.view = () => view;
   A.go = v => { location.hash = '#/' + v; };
   function renderNav() {
-    const st = stats();
-    $('#nav').innerHTML = NAV.map(([k, t, i]) => `<button class="nav ${view === k ? 'on' : ''}" data-act="nav" data-v="${k}">${icon(i)}<span>${t}</span>${k === 'approvals' && st.review ? `<span class="count">${st.review}</span>` : ''}</button>`).join('')
-      + `<hr><button class="nav" data-act="guide">${icon('help')}<span>Demo guide</span></button><button class="nav" data-act="reset-demo">${icon('undo')}<span>Reset demo data</span></button><div class="foot">CDM v2.0 · prototype<br>Sample data, no real servers are touched.</div>`;
+    const st = stats(), badge = { approvals: st.review, errors: S.errors.filter(e => e.status === 'open').length };
+    put($('#nav'), NAV.map(([k, t, i]) => `<button class="nav ${view === k ? 'on' : ''}" data-act="nav" data-v="${k}">${icon(i)}<span>${t}</span>${badge[k] ? `<span class="count">${badge[k]}</span>` : ''}</button>`).join('')
+      + `<hr><button class="nav" data-act="guide">${icon('help')}<span>Demo guide</span></button><button class="nav" data-act="reset-demo">${icon('undo')}<span>Reset demo data</span></button><div class="foot">CDM v2.0 · prototype<br>Sample data, no real servers are touched.</div>`);
   }
   function renderTop() {
     const R = A.RUN, running = R && ['running', 'paused', 'stopping'].includes(R.status);
     const runChip = running ? `<span class="chip plain"><span class="dot ${R.status === 'paused' ? 'amber' : 'pulse'}"></span>Run ${esc(R.status)}</span>` : '';
-    $('#top').innerHTML = `<div class="badge-logo">CDM</div><div><h1>Certificate Deployment Manager</h1><div class="tagline">Automated discovery, renewal, deployment and rollback across Linux, Windows and Java estates</div></div>
+    put($('#top'), `<div class="badge-logo">CDM</div><div><h1>Certificate Deployment Manager</h1><div class="tagline">Automated discovery, renewal, deployment and rollback across Linux, Windows and Java estates</div></div>
       <div class="actions">${runChip}
       <button class="btn" data-act="theme">${icon('sun')}Theme</button>
-      <button class="btn ${S.killSwitch ? 'good' : 'danger'}" data-act="killswitch">${icon('power')}${S.killSwitch ? 'Resume renewals' : 'Emergency stop'}</button></div>`;
-    $('#banners').innerHTML = S.killSwitch ? `<div class="banner">${icon('power')}<div><b>Emergency stop is active.</b> All renewals and deployments are frozen. Scans and reports still work.</div></div>` : '';
+      ${!S.setup.done && !S.killSwitch ? `<button class="btn primary" data-act="nav" data-v="setup">${icon('gear')}Set up automation</button>`   // nothing to stop until automation has been started
+        : `<button class="btn ${S.killSwitch ? 'good' : 'danger'}" data-act="killswitch">${icon('power')}${S.killSwitch ? 'Resume automation' : 'Emergency stop'}</button>`}</div>`);
+    put($('#banners'), S.killSwitch ? `<div class="banner">${icon('power')}<div><b>Emergency stop is active. Automation is stopped.</b> No renewal or deployment starts. Scans and reports still work. ${S.setup.done ? 'Open Automation setup to resume or terminate it.' : 'Use Resume automation to allow renewals again.'}</div></div>` : '');
   }
   A.renderTop = renderTop; A.renderNav = renderNav;
-  A.renderView = () => {
-    const v = A.views[view] || A.views.overview;
-    $('#view').innerHTML = v.render(); if (v.after) v.after();
+  A.renderView = soft => {
+    const v = A.views[view] || A.views.overview, el = $('#view'), html = v.render();
+    if (soft && el._h === html) return;            // a background redraw of an unchanged page leaves it (and any click in progress) alone
+    el.innerHTML = html; el._h = html; if (v.after) v.after();
   };
   A.render = () => { document.documentElement.dataset.theme = S.theme; renderTop(); renderNav(); A.renderView(); };
   let uiT = 0;
-  A.ui = () => { if (uiT) return; uiT = setTimeout(() => { uiT = 0; renderTop(); renderNav(); const v = A.views[view]; if (v && v.live) v.live(); else if (v && A.live.has(view)) A.renderView(); }, 60); };
+  A.ui = () => { if (uiT) return; uiT = setTimeout(() => { uiT = 0; renderTop(); renderNav(); const v = A.views[view]; if (v && v.live) v.live(); else if (v && A.live.has(view)) A.renderView(true); }, 60); };
   function route() { const v = (location.hash.match(/^#\/(\w+)/) || [])[1]; view = A.views[v] ? v : 'overview'; A.closeLayer(); A.render(); window.scrollTo(0, 0); }
   window.addEventListener('hashchange', route);
 
@@ -155,28 +232,40 @@
     render() {
       const st = stats(), now = new Date(), w = S.settings.windowDays;
       const months = []; for (let i = 0; i < 12; i++) { const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + i, 1)); months.push({ key: d.toISOString().slice(0, 7), label: d.toLocaleString('en', { month: 'short', timeZone: 'UTC' }), n: 0 }); }
-      let past = 0; S.certs.forEach(c => { const k = new Date(c.notAfter).toISOString().slice(0, 7), m = months.find(x => x.key === k); if (m) m.n++; else if (c.notAfter < Date.now()) past++; });
+      let past = 0; A.certs().forEach(c => { const k = new Date(c.notAfter).toISOString().slice(0, 7), m = months.find(x => x.key === k); if (m) m.n++; else if (c.notAfter < Date.now()) past++; });
       const maxM = Math.max(1, ...months.map(m => m.n));
-      const byType = count(S.certs, c => c.type), byOs = count(S.certs, c => { const s = srv(c.serverId); return s.tech === 'java_keystore' ? 'Java keystore' : s.os === 'windows' ? 'Windows' : 'Linux'; });
-      const attention = S.certs.filter(c => status(c) === 'expired' || c.state === 'Failed' || c.state === 'Review' || (!c.managed && isDue(c))).sort((a, b) => a.notAfter - b.notAfter).slice(0, 8);
+      const byType = count(A.certs(), c => c.type), byOs = count(A.certs(), c => { const s = srv(c.serverId); return s.tech === 'java_keystore' ? 'Java keystore' : s.os === 'windows' ? 'Windows' : 'Linux'; });
+      const attention = A.certs().filter(c => status(c) === 'expired' || c.state === 'Failed' || c.state === 'Review' || (!c.managed && isDue(c))).sort((a, b) => a.notAfter - b.notAfter).slice(0, 8);
       const events = S.audit.slice(-5).reverse(), lastRun = S.audit.slice().reverse().find(e => e.type === 'run.finished');
-      const next = new Date(); next.setHours(S.schedule.hour, 0, 0, 0); if (next < new Date()) next.setDate(next.getDate() + 1);
-      const mins = Math.round((next - new Date()) / 60000);
+      // demo certificates: a few that renew cleanly, one at a time by hand or all together by automation
+      const ready = A.readyToRenew(), demo = A.demoCerts(), busy = !!A.RUN && ['running', 'paused', 'stopping'].includes(A.RUN.status), off = busy || S.killSwitch;
+      const platform = s => (s.tech === 'java_keystore' ? 'Java keystore' : s.tech.replace('_', ' ').replace(/^windows/, 'Windows').replace(/^linux/, 'Linux').replace('iis', 'IIS'));
+      // one run for every ready certificate; before any CA is selected there is nothing to run (the header already offers Set up automation)
+      const runBtn = A.scopeOn() ? `<div class="row" style="margin-top:18px"><button class="btn primary" data-act="auto-run" ${off || !ready.length ? 'disabled' : ''}>${icon('play')}Run automation now</button></div>` : '';
+      const demoCard = `<div class="card"><div class="row spread"><div><h3>Demo certificates ready to renew</h3><div class="sub" style="margin-bottom:0">${!A.scopeOn() ? 'Select the Root CAs and Issuing CAs first: CDM renews only certificates issued by the CAs you choose.'
+          : ready.length ? `${ready.length} certificate${ready.length === 1 ? '' : 's'} from the selected CAs ${ready.length === 1 ? 'is' : 'are'} due and will renew cleanly. Renew one by hand and follow it stage by stage, or let automation renew all of them in one run.` : 'No certificate from the selected CAs is due right now.'}</div></div>
+          ${A.scopeOn() && A.restorable().length ? `<button class="btn" data-act="restore-due" ${busy ? 'disabled' : ''}>${icon('undo')}Make ${A.restorable().length} renewed test certificate${A.restorable().length === 1 ? '' : 's'} due again</button>` : ''}</div>
+        ${demo.length ? `<div class="tablewrap" style="border:0;margin-top:14px"><table><thead><tr><th>Certificate</th><th>Server</th><th>Issuer</th><th>Expires</th><th>Renews by</th><th class="right">Manual</th></tr></thead><tbody>${demo.map(c => { const s = srv(c.serverId), d = Math.round(dleft(c));
+          return `<tr><td><div class="cn">${esc(c.cn)}</div><div class="sub mono">${esc(c.location)}</div></td><td>${esc(s.name)}<div class="sub">${esc(platform(s))} · ${esc(s.zone)}</div></td><td>${esc(c.ca)}<div class="sub">${pill(c.type, c.type === 'DV' ? 'cyan' : c.type === 'OV' ? 'purple' : 'amber')}</div></td>
+            <td class="nowrap">${statusPill(c)}<div class="sub">${d < 0 ? `${-d} days ago` : `in ${d} days`}</div></td><td>${c.type === 'DV' ? 'ACME order' : 'Folder pick-up'}<div class="sub">automatic at the next run</div></td>
+            <td class="nowrap right"><button class="btn sm" data-act="renew" data-id="${c.id}" ${off ? 'disabled' : ''}>${icon('route')}Renew now</button></td></tr>`; }).join('')}</tbody></table></div>
+          ${ready.length > demo.length ? `<div class="muted" style="font-size:.86rem;margin-top:10px">Showing ${demo.length} of ${ready.length}. The rest are listed on <a class="lnk" href="#/journey">Certificate journey</a> and under <a class="lnk" href="#/certificates">Certificates</a>.</div>` : ''}` : ''}</div>`;
       return `
       <div class="card hero"><div><h2>Certificate compliance at a glance</h2><p>Monitor lifecycle health, find expiring assets across every server, and renew, deploy and roll back without leaving this screen.</p>
-        <div class="meta">Scope: <b>${S.servers.length} servers</b> · Renewal window: <b>${w} days</b> · Generated: <b>${fmtDT(Date.now())} UTC</b></div>
-        <div class="row" style="margin-top:18px"><button class="btn primary" data-act="run-now">${icon('play')}Run renewal pipeline</button></div></div>
+        <div class="meta">Scope: <b>${S.servers.length} servers</b> · Renewal window: <b>${w} days</b> · Generated: <b>${fmtDT(Date.now())} UTC</b></div>${runBtn}</div>
         <div class="donut-wrap">${donut([{ v: st.valid, c: 'var(--green)' }, { v: st.expiring, c: 'var(--amber)' }, { v: st.expired, c: 'var(--red)' }], 190, 24, `${st.total}<small>CERTIFICATES</small>`)}
         <div class="legend"><div><span class="sw" style="background:var(--green)"></span>Valid<b>${st.valid}</b></div><div><span class="sw" style="background:var(--amber)"></span>Expiring<b>${st.expiring}</b></div><div><span class="sw" style="background:var(--red)"></span>Expired<b>${st.expired}</b></div><div class="muted" style="margin-top:6px">${Math.round(st.valid / st.total * 100)}% compliant</div></div></div></div>
       <div class="kpis">${kpi('Total discovered', st.total, 'var(--cyan)', `${S.servers.length} servers scanned`, 'all')}${kpi('Valid', st.valid, 'var(--green)', 'outside the renewal window', 'valid')}${kpi('Expiring soon', st.expiring, 'var(--amber)', `within ${w} days`, 'expiring')}${kpi('Expired', st.expired, 'var(--red)', 'needs immediate action', 'expired')}</div>
+      ${demoCard}
       <div class="grid g21"><div class="card fc"><h3>Expiry forecast · next 12 months</h3><div class="sub">Click a month to list those certificates${past ? ` · ${past} already expired` : ''}</div>
-        <div class="bars">${months.map((m, i) => `<button class="b" data-act="month" data-k="${m.key}" title="${m.n} expiring in ${m.label}"><span class="v">${m.n}</span><div class="col" style="height:${m.n / maxM * 78 + 2}%;--c:${i === 0 ? 'var(--amber)' : 'var(--blue)'}"></div><small>${m.label}</small></button>`).join('')}</div></div>
+        <div class="bars">${months.map((m, i) => `<button class="b" data-act="month" data-k="${m.key}" title="${m.n} expiring in ${m.label}"><span class="v">${m.n}</span><div class="col" style="height:${m.n / maxM * 78 + 2}%;--c:${i === 0 ? 'var(--amber)' : 'var(--blue)'}"></div><small>${m.label}</small></button>`).join('')}</div>
+</div>
         <div class="grid" style="align-content:stretch;grid-template-rows:1fr 1fr"><div class="card"><h3>By certificate type</h3><div class="sub">DV is renewed automatically via ACME</div>${['DV', 'OV', 'EV'].map(k => hbar(k, byType[k] || 0, st.total, k === 'DV' ? 'var(--cyan)' : k === 'OV' ? 'var(--purple)' : 'var(--amber)')).join('')}</div>
         <div class="card"><h3>By platform</h3><div class="sub">One pipeline, three technologies</div>${Object.entries(byOs).map(([k, v]) => hbar(k, v, st.total, k === 'Linux' ? 'var(--green)' : k === 'Windows' ? 'var(--blue)' : 'var(--amber)')).join('')}</div></div></div>
       <div class="grid g21"><div class="card"><h3>Needs attention</h3><div class="sub">Expired, failed, awaiting approval, or unmanaged and due</div>
         <div class="tablewrap" style="border:0"><table><thead><tr><th>Certificate</th><th>Server</th><th>Expires</th><th>Why</th><th></th></tr></thead><tbody>${attention.map(c => `<tr class="clickable" data-act="cert" data-id="${c.id}"><td><div class="cn">${esc(c.cn)}</div></td><td>${esc(srv(c.serverId).name)}</td><td class="nowrap">${statusPill(c)} ${Math.round(dleft(c))}d</td><td class="muted">${esc(c.state === 'Failed' ? c.lastError : c.state === 'Review' ? 'awaiting approval' : status(c) === 'expired' ? 'expired' : 'not managed: ' + (inel(c) || 'run enrolment'))}</td><td><button class="btn sm">Open</button></td></tr>`).join('') || '<tr><td colspan="5" class="empty">Nothing needs attention.</td></tr>'}</tbody></table></div></div>
-        <div class="grid" style="grid-template-rows:auto 1fr"><div class="card"><h3>Scheduled run</h3><div class="sub">${S.schedule.enabled ? `Daily at ${String(S.schedule.hour).padStart(2, '0')}:00 · next in ${Math.floor(mins / 60)} h ${mins % 60} min` : 'Schedule is paused'}</div>
-          <div class="muted" style="font-size:.88rem">Last run: ${lastRun ? `${rel(lastRun.ts)} · exit ${lastRun.detail.exit ?? 0}` : '—'}</div><div class="row" style="margin-top:12px"><button class="btn sm" data-act="toggle-schedule">${S.schedule.enabled ? 'Pause schedule' : 'Resume schedule'}</button></div></div>
+        <div class="grid" style="grid-template-rows:auto 1fr"><div class="card"><h3>Scheduled run</h3><div class="sub">${!S.setup.done ? 'Automation is not set up yet' : S.killSwitch ? 'Automation is stopped (emergency stop)' : S.schedule.enabled ? `${A.scheduleText()} · next ${A.untilText(A.scheduleNext())}` : 'Automation is paused'}</div>
+          <div class="muted" style="font-size:.88rem">Last run: ${lastRun ? `${rel(lastRun.ts)} · exit ${lastRun.detail.exit ?? 0}` : '—'}</div><div class="row" style="margin-top:12px">${S.setup.done ? `<button class="btn sm" data-act="toggle-schedule">${S.schedule.enabled ? 'Pause schedule' : 'Resume schedule'}</button>` : `<button class="btn sm primary" data-act="nav" data-v="setup">Set up automation</button>`}</div></div>
           <div class="card"><h3>Recent activity</h3><div class="sub">Hash-chained audit trail</div><ul class="tl">${events.map(e => `<li style="--c:${/failed|tamper/.test(e.type) ? 'var(--red)' : /rollback/.test(e.type) ? 'var(--amber)' : 'var(--green)'}"><b>${esc(e.type)}</b> <span class="muted">${esc(e.target)}</span><br><span class="faint">${rel(e.ts)}</span></li>`).join('')}</ul></div></div></div>`;
     },
   };
@@ -185,7 +274,7 @@
   const F = A.F = { q: '', status: '', type: '', os: '', zone: '', state: '', month: '', sort: 'days', dir: 1, limit: 60 };
   function filtered() {
     const q = F.q.trim().toLowerCase();
-    let list = S.certs.filter(c => {
+    let list = A.certs().filter(c => {
       const s = srv(c.serverId);
       if (F.status && status(c) !== F.status) return false;
       if (F.type && c.type !== F.type) return false;
@@ -206,7 +295,7 @@
   };
   function certRows() {
     const list = filtered(), shown = list.slice(0, F.limit);
-    $('#cert-count').textContent = `${list.length} of ${S.certs.length} records`;
+    $('#cert-count').textContent = `${list.length} of ${A.certs().length} records`;
     $('#cert-body').innerHTML = shown.map(c => {
       const s = srv(c.serverId), d = dleft(c), life = c.type === 'DV' ? 90 : 365, pct = Math.max(2, Math.min(100, d / life * 100)), col = { valid: 'var(--green)', expiring: 'var(--amber)', expired: 'var(--red)' }[status(c)];
       const can = c.managed && !c.paused && c.state !== 'Review' && isDue(c);
@@ -218,6 +307,7 @@
     $('#cert-more').textContent = `Show ${Math.min(60, list.length - F.limit)} more`;
   }
   const opt = (v, t, cur) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${t}</option>`;
+  Object.assign(A, { opt, exportCsv });
   A.views.certificates = {
     render() {
       return `<div class="card ap-card"><div class="toolbar flat"><input class="input grow" id="f-q" placeholder="Search common name, thumbprint, serial, server or job ID…" value="${esc(F.q)}">
@@ -255,11 +345,11 @@
     const can = c.managed && !c.paused && c.state !== 'Review' && isDue(c) && !S.killSwitch;
     A.openDrawer(`<div class="row spread"><div><h3 style="font-size:1.25rem;word-break:break-all">${esc(c.cn)}</h3><div class="row" style="margin-top:8px">${statusPill(c)}${statePill(c)}${pill(c.type, c.type === 'DV' ? 'cyan' : c.type === 'OV' ? 'purple' : 'amber')}</div></div><button class="btn sm" data-act="close-layer">Close</button></div>
       ${c.lastError ? `<div class="banner" style="margin-top:14px"><div><b>Last error:</b> ${esc(c.lastError)}</div></div>` : ''}${c.paused ? `<div class="banner info" style="margin-top:14px"><div><b>Renewal paused:</b> ${esc(c.pauseReason)}</div></div>` : ''}
-      <dl class="kv"><dt>Server</dt><dd>${esc(s.name)} (${esc(s.host)}) · ${esc(s.zone)}</dd><dt>Platform</dt><dd>${esc(s.tech.replace('_', ' '))} via ${s.transport.toUpperCase()}</dd><dt>Binding</dt><dd class="mono">${esc(c.location)}</dd><dt>Issuer</dt><dd>${esc(c.ca)}</dd><dt>Renewal source</dt><dd>${c.managed ? esc(c.source) + (c.source === 'Folder' ? ' (approval policy applies)' : ' (automatic)') : 'Not managed: ' + esc(inel(c) || c.ineligible || 'enrol to manage')}</dd>
+      <dl class="kv"><dt>Server</dt><dd>${esc(s.name)} (${esc(s.host)}) · ${esc(s.zone)}</dd><dt>Platform</dt><dd>${esc(s.tech.replace('_', ' '))} via ${s.transport.toUpperCase()}</dd><dt>Binding</dt><dd class="mono">${esc(c.location)}</dd><dt>Issuer</dt><dd>${esc(c.ca)} ${A.scopeOn() && A.caVerdict(c).ok ? pill('Selected CA', 'green') : ''}</dd><dt>Renewal source</dt><dd>${c.managed ? esc(c.source) + (c.source === 'Folder' ? ' (approval policy applies)' : ' (automatic)') : 'Not managed: ' + esc(inel(c) || c.ineligible || 'enrol to manage')}</dd>
       <dt>Key</dt><dd>${esc(c.keyAlg)}</dd><dt>Valid</dt><dd>${fmtDate(c.notBefore)} → ${fmtDate(c.notAfter)} (${d < 0 ? 'expired ' + Math.round(-d) + ' days ago' : Math.round(d) + ' days left'})</dd><dt>SHA-256</dt><dd class="mono">${esc(c.thumbprint)}</dd><dt>Serial</dt><dd class="mono">${esc(c.serial)}</dd><dt>Last scanned</dt><dd>${rel(c.lastScanned)}</dd></dl>
       <div class="muted" style="font-size:.85rem">Names (SAN)</div><div class="chips" style="margin:6px 0 16px">${c.san.map(x => `<span>${esc(x)}</span>`).join('')}</div>
       <div class="row" style="margin:16px 0"><button class="btn primary" data-act="renew" data-id="${c.id}" ${can ? '' : 'disabled'}>${icon('play')}Renew now</button><button class="btn" data-act="${c.paused ? 'resume' : 'pause'}" data-id="${c.id}" ${c.managed ? '' : 'disabled'}>${icon('pause')}${c.paused ? 'Resume renewal' : 'Pause renewal'}</button>
-      <button class="btn" data-act="rollback-job" data-id="${lastJob ? lastJob.id : ''}" ${lastJob ? '' : 'disabled'}>${icon('undo')}Roll back last renewal</button><button class="btn" data-act="scan-from" data-id="${s.id}">${icon('radar')}Scan server</button>${!c.managed && !inel(c) ? `<button class="btn good" data-act="enrol-one" data-id="${c.id}">Enrol for auto-renewal</button>` : ''}</div>
+      <button class="btn" data-act="rollback-job" data-id="${lastJob ? lastJob.id : ''}" ${lastJob ? '' : 'disabled'}>${icon('undo')}Roll back last renewal</button><button class="btn" data-act="scan-from" data-id="${s.id}">${icon('radar')}Scan server</button><button class="btn" data-act="journey-open" data-id="${c.id}">${icon('route')}Show journey</button>${!c.managed && !inel(c) ? `<button class="btn good" data-act="enrol-one" data-id="${c.id}">Enrol for auto-renewal</button>` : ''}</div>
       <h4 style="margin-top:20px">Renewal history</h4><ul class="tl">${c.history.length ? c.history.map(h => `<li style="--c:${/Roll/.test(h.outcome) ? 'var(--amber)' : 'var(--green)'}"><b>${esc(h.outcome)}</b> · ${fmtDT(h.at)}<br><span class="mono faint">${esc(h.jobId)} · ${esc(short(h.from, 10))} → ${esc(short(h.to, 10))}</span></li>`).join('') : '<li class="muted">No renewals recorded yet.</li>'}</ul>`);
   };
   A.handlers.cert = el => A.certDrawer(el.dataset.id);
@@ -319,7 +409,7 @@
   const AP = { q: '', type: '', zone: '', server: '', status: '', sel: new Set() };
   const apItems = () => {
     const q = AP.q.trim().toLowerCase();
-    return S.certs.filter(c => {
+    return A.certs().filter(c => {
       if (c.state !== 'Review') return false; const s = srv(c.serverId);
       if (AP.type && c.type !== AP.type) return false;
       if (AP.zone && s.zone !== AP.zone) return false;
@@ -330,7 +420,7 @@
   };
   const REASON_COLOR = { approval: 'amber', downgrade: 'red', ambiguous: 'purple' };
   function apList() {
-    const all = S.certs.filter(c => c.state === 'Review'), items = apItems();
+    const all = A.certs().filter(c => c.state === 'Review'), items = apItems();
     for (const id of [...AP.sel]) if (!all.some(c => c.id === id)) AP.sel.delete(id);
     const nSel = items.filter(c => AP.sel.has(c.id)).length;
     $('#ap-count').textContent = `Showing ${items.length} of ${all.length} pending`;
@@ -350,11 +440,11 @@
   }
   A.views.approvals = {
     render() {
-      const pend = S.certs.filter(c => c.state === 'Review');
+      const pend = A.certs().filter(c => c.state === 'Review');
       const sv = [...new Map(pend.map(c => [c.serverId, srv(c.serverId)])).values()], zones = [...new Set(pend.map(c => srv(c.serverId).zone))];
       const tile = (k, lbl, color) => `<button class="kpi small ${AP.status === k ? 'active' : ''}" style="--c:var(--${color})" data-act="ap-quick" data-k="${k}"><div class="lbl">${lbl}</div><div class="num" id="ap-n-${k}">0</div></button>`;
       return `<div class="card"><h3>Approvals & review queue</h3><div class="sub" style="margin-bottom:0">CDM never guesses. Anything risky waits here for a person, and every decision is written to the audit trail.</div></div>
-        <div class="kpis">${tile('approval', 'Approval required', 'amber')}${tile('downgrade', 'Type downgrade blocked', 'red')}${tile('ambiguous', 'Ambiguous match', 'purple')}</div>
+        <div class="kpis wide">${tile('approval', 'Approval required', 'amber')}${tile('downgrade', 'Type downgrade blocked', 'red')}${tile('ambiguous', 'Ambiguous match', 'purple')}</div>
         <div class="card ap-card">
           <div class="toolbar flat"><input class="input grow" id="ap-q" placeholder="Search certificate, server or host…" value="${esc(AP.q)}">
             <select class="input" data-ap="type">${opt('', 'All types', AP.type)}${opt('OV', 'OV', AP.type)}${opt('EV', 'EV', AP.type)}${opt('DV', 'DV', AP.type)}</select>
@@ -391,7 +481,7 @@
   };
   A.handlers.approve = el => {
     const c = certById(el.dataset.id); if (!c) return; c.approved = true; c.state = 'Managed'; delete c.review; A.audit('approval.granted', c.cn, { by: S.settings.actor });
-    toast('Approved: ' + c.cn, 'ok'); if (el.dataset.now) { A.go('pipeline'); setTimeout(() => A.handlers['renew'] && A.handlers['renew']({ dataset: { id: c.id } }), 80); } else { A.renderView(); A.ui(); }
+    toast('Approved: ' + c.cn, 'ok'); if (el.dataset.now) { A.handlers['renew'] && A.handlers['renew']({ dataset: { id: c.id } }); } else { A.renderView(); A.ui(); }
   };
   A.handlers.reject = el => { const c = certById(el.dataset.id); if (!c) return; c.state = 'Managed'; c.paused = true; c.pauseReason = 'Rejected by ' + S.settings.actor; delete c.review; A.audit('approval.rejected', c.cn, {}); toast('Rejected: renewal paused for ' + c.cn, 'warn'); A.renderView(); A.ui(); };
 
@@ -440,12 +530,23 @@
         <div class="ctrl-grid"><div><b>Renewal window: <span id="lbl-windowDays">${s.windowDays}</span> days</b><input type="range" min="7" max="60" value="${s.windowDays}" data-range="windowDays"><div class="muted" style="font-size:.85rem" id="win-preview">${st.due} managed certificates are due now · ${st.expiring} expiring overall</div></div>
         <div><b>Max enrolments per server per run: <span id="lbl-maxPerRun">${s.maxPerRun}</span></b><input type="range" min="1" max="50" value="${s.maxPerRun}" data-range="maxPerRun"><div class="muted" style="font-size:.85rem">Keeps a single run from flooding the CA.</div></div>
         <div><b>Parallel deployments per zone: <span id="lbl-maxParallel">${s.maxParallel}</span></b><input type="range" min="1" max="10" value="${s.maxParallel}" data-range="maxParallel"><div class="muted" style="font-size:.85rem">After the canary succeeds.</div></div></div></div>
-      <div class="card"><h3>Safety controls</h3><div class="sub">The defaults are what you would run in production.</div><div class="ctrl-grid">${tog('canary', 'Canary first', 'Deploy one server per zone, then the rest')}${tog('stopOnFailure', 'Halt the zone on first failure', 'Remaining jobs in that zone are skipped')}${tog('approveOvEv', 'Human approval for OV/EV', 'Never auto-replace validated certificates')}${tog('autoEnrol', 'Scan-driven enrolment', 'Enrol every due, ACME-replaceable certificate found')}${tog('autoInstallAdapter', 'Auto-install Linux adapter', 'Copy the reviewed script over SSH when missing')}</div></div>
+      <div class="card"><h3>Safety controls</h3><div class="sub">Applied to every run.</div><div class="ctrl-grid">${tog('canary', 'Canary first', 'Deploy one server per zone, then the rest')}${tog('stopOnFailure', 'Halt the zone on first failure', 'Remaining jobs in that zone are skipped')}${tog('approveOvEv', 'Human approval for OV/EV', 'Hold OV/EV renewals under Approvals until a person approves them')}${tog('autoEnrol', 'Scan-driven enrolment', 'Enrol every due, ACME-replaceable certificate found')}${tog('autoInstallAdapter', 'Auto-install Linux adapter', 'Copy the reviewed script over SSH when missing')}</div></div>
       <div class="card"><h3>Certificate authority & operator</h3><div class="ctrl-grid"><label><b>ACME environment</b><br><select class="input" data-setsel="acmeEnv" style="margin-top:6px">${opt('staging', "Let's Encrypt staging (lab)", s.acmeEnv)}${opt('production', "Let's Encrypt production", s.acmeEnv)}</select></label>
         <label><b>Operator identity (audit actor)</b><br><input class="input" data-settext="actor" value="${esc(s.actor)}" style="margin-top:6px;width:100%"></label></div></div>`;
     },
   };
   A.setSetting = (k, v) => { S.settings[k] = v; A.save(); };
+  // Emergency stop: automation stops until it is resumed (same settings) or terminated (back to the starting setup).
+  const stopRun = () => { if (A.RUN && ['running', 'paused'].includes(A.RUN.status)) { A.RUN.stop = true; if (A.RUN.status === 'paused') A.RUN.status = 'running'; } };
+  A.emergencyStop = () => { S.killSwitch = true; stopRun(); A.audit('killswitch.engaged', 'automation', {}); toast('Emergency stop engaged: automation is stopped', 'err'); A.render(); };
+  A.resumeAutomation = () => { S.killSwitch = false; A.audit('killswitch.released', 'automation', {}); toast('Automation resumed', 'ok'); A.render(); };
+  A.terminateAutomation = () => {
+    stopRun(); const had = { rootCAs: S.setup.selRoots.length, issuingCAs: S.setup.selIssuers.length, schedule: A.scheduleText() };
+    Object.assign(S.setup, { done: false, completedAt: null, selRoots: [], selIssuers: [] }); S.schedule = fresh().schedule; S.killSwitch = false; if (A.W) A.W.reset();
+    A.audit('automation.terminated', 'automation', had); toast('Automation terminated. Complete the setup to start it again', 'warn');
+    A.render(); if (A.view() !== 'setup') A.go('setup');
+    window.scrollTo(0, 0);
+  };
 
   // ------------------------------------------------------------------ global events
   document.addEventListener('click', e => {
@@ -472,13 +573,18 @@
     nav: el => A.go(el.dataset.v),
     theme: () => { S.theme = S.theme === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = S.theme; A.save(); },
     'reset-demo': () => A.confirm({ title: 'Reset demo data?', body: 'All changes you made (runs, rollbacks, approvals, policy) are discarded and the original sample estate is restored.', label: 'Reset', danger: true, onYes: () => A.reset() }),
-    'toggle-schedule': () => { S.schedule.enabled = !S.schedule.enabled; A.audit('schedule.changed', 'daily-run', { enabled: S.schedule.enabled }); A.renderView(); },
+    'toggle-schedule': () => { S.schedule.enabled = !S.schedule.enabled; A.audit('schedule.changed', 'automation', { enabled: S.schedule.enabled }); A.renderView(); },
     killswitch: () => {
-      if (S.killSwitch) { S.killSwitch = false; A.audit('killswitch.released', 'renewals', {}); toast('Renewals resumed', 'ok'); A.render(); return; }
-      A.confirm({ title: 'Engage emergency stop?', danger: true, label: 'Freeze all renewals', body: 'No new renewal or deployment will start. A run that is in progress finishes its in-flight jobs safely and then stops. Scans and reports keep working.',
-        onYes: () => { S.killSwitch = true; if (A.RUN && ['running', 'paused'].includes(A.RUN.status)) { A.RUN.stop = true; if (A.RUN.status === 'paused') A.RUN.status = 'running'; } A.audit('killswitch.engaged', 'renewals', {}); toast('Emergency stop engaged', 'err'); A.render(); } });
+      if (S.killSwitch) return A.resumeAutomation();
+      A.confirm({ title: 'Engage emergency stop?', danger: true, label: 'Stop automation', body: 'Automation stops: no new renewal or deployment will start. A run that is in progress finishes its in-flight jobs safely and then stops. Scans and reports keep working. Afterwards you can resume automation or terminate it.',
+        onYes: () => A.emergencyStop() });
     },
-    guide: () => A.openModal(`<div class="row spread"><h3>Suggested demo walkthrough</h3><button class="btn sm" data-act="close-layer">Close</button></div><ol style="line-height:1.8;padding-left:20px"><li><b>Overview</b>: compliance donut and expiry forecast show the whole estate at a glance.</li><li><b>Scan</b> lnx01 or win01: every certificate is listed; filter to those expiring within 30 days and enrol them.</li><li><b>Renewal pipeline</b>: run it. Watch discover, landing, match, plan, deploy and confirm. Try <i>Pause</i> and <i>Stop</i>.</li><li>Tick <b>Fail the next deployment</b> and run again: CDM rolls the server back automatically and halts that zone.</li><li><b>Jobs & rollback</b>: roll a successful renewal back, or restore a backup.</li><li><b>Approvals</b>: OV/EV replacements wait for a human decision.</li><li><b>Audit</b>: verify the hash chain, then simulate tampering and verify again.</li><li>Hit <b>Emergency stop</b> to freeze everything during a change window.</li></ol>`),
+    'restore-due': () => A.restoreDue(),
+    'automation-resume': () => A.resumeAutomation(),
+    'automation-terminate': () => A.confirm({ title: 'Terminate automation?', danger: true, label: 'Terminate automation',
+      body: 'The automation setup is removed: the selected Root CAs and Issuing CAs and the schedule are cleared, and no run starts until the setup is completed again. Certificates, job history, backups and the audit trail are kept.',
+      onYes: () => A.terminateAutomation() }),
+    guide: () => A.openModal(`<div class="row spread"><h3>Suggested demo walkthrough</h3><button class="btn sm" data-act="close-layer">Close</button></div><ol style="line-height:1.8;padding-left:20px"><li><b>Overview</b>: compliance donut and expiry forecast show the whole estate at a glance.</li><li><b>Scan</b> lnx01 or win01: every certificate is listed; filter to those expiring within 30 days and enrol them.</li><li><b>Automation setup</b>: select the root and issuing CAs, review, set the schedule and start. No CA is selected to begin with. After that, CDM shows and renews only the certificates issued by the CAs you selected; all others are left out.</li><li><b>Certificate journey</b>: pick one certificate that is due and step through its renewal, stage by stage, from discover to retire-replaced.</li><li><b>Jobs & rollback</b>: roll a successful renewal back, or restore a backup.</li><li><b>Approvals</b>: renewals CDM refuses to guess about (a type downgrade, an ambiguous match) wait for a human decision.</li><li><b>Error table</b>: every problem from any stage, with its code, what happened to the server and how to fix it.</li><li><b>Audit</b>: verify the hash chain, then simulate tampering and verify again.</li><li>Hit <b>Emergency stop</b> to stop automation during a change window, then <i>Resume</i> it, or <i>Terminate</i> it to go back to the starting setup.</li></ol>`),
   });
   window.addEventListener('load', () => { if (!location.hash) location.hash = '#/overview'; route(); });
 })();
