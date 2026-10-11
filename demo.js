@@ -211,15 +211,17 @@
   }
 
   // ------------------------------------------------------------------ trust store scan
+  // Where one CA certificate is: a row per server's trust store, found, missing, or not scanned (server unreachable).
+  function trustState(ca) {
+    const rows = SERVERS.map(s => ({ server: s.id, os: s.os, store: s.store, state: s.unreachable ? 'unknown' : (MISSING[ca.name] || []).includes(s.id) ? 'missing' : 'found' }));
+    return { ...ca, thumb: hex(ca.name, 40), rows, scanned: rows.filter(r => r.state !== 'unknown').length, found: rows.filter(r => r.state === 'found'), missing: rows.filter(r => r.state === 'missing') };
+  }
   // Looks in every trust store for CA certificates whose name contains the text, and reports where each one is and is not.
   async function scanTrust(text) {
     const q = text.trim(); if (!q || S.trust.scanning) return;
     Object.assign(S.trust, { q, scanning: true, progress: 0, results: null, pick: null }); render();
     for (let i = 0; i < SERVERS.length; i++) { await wait(260); S.trust.progress = (i + 1) / SERVERS.length; S.trust.at = SERVERS[i].id; render(); }
-    const hits = CA_CERTS.filter(ca => ca.name.toLowerCase().includes(q.toLowerCase())).map(ca => {
-      const rows = SERVERS.map(s => ({ server: s.id, os: s.os, store: s.store, state: s.unreachable ? 'unknown' : (MISSING[ca.name] || []).includes(s.id) ? 'missing' : 'found' }));
-      return { ...ca, thumb: hex(ca.name, 40), rows, scanned: rows.filter(r => r.state !== 'unknown').length, found: rows.filter(r => r.state === 'found'), missing: rows.filter(r => r.state === 'missing') };
-    }).sort((a, b) => (a.kind === 'Root' ? 0 : 1) - (b.kind === 'Root' ? 0 : 1) || b.missing.length - a.missing.length);   // roots first, then the ones missing in most places
+    const hits = CA_CERTS.filter(ca => ca.name.toLowerCase().includes(q.toLowerCase())).map(trustState).sort((a, b) => (a.kind === 'Root' ? 0 : 1) - (b.kind === 'Root' ? 0 : 1) || b.missing.length - a.missing.length);   // roots first, then the ones missing in most places
     Object.assign(S.trust, { scanning: false, results: hits, pick: hits.length ? hits[0].name : null }); render();
   }
 
@@ -227,6 +229,9 @@
   const head = (title, sub) => `<div class="top"><div><h1>${title}</h1><p>${sub}</p></div>
     <div class="scope"><label for="ca">Issuing CA</label><select id="ca" data-change="ca"><option value="all" ${S.ca === 'all' ? 'selected' : ''}>All issuing CAs</option>${ISSUERS.map(i => `<option value="${i.id}" ${S.ca === i.id ? 'selected' : ''}>${esc(i.name)}</option>`).join('')}</select></div></div>`;
   const stat = (label, n, color, act) => `<${act ? `button data-act="${act}"` : 'div'} class="stat ${color}"><div class="lbl">${label}</div><div class="num">${n}</div></${act ? 'button' : 'div'}>`;
+
+  // dashboard figure: label and a short hint on the left, the number on the right, and it opens the matching list
+  const kpi = (label, hint, n, color, act) => `<button class="kpi ${color}" data-act="${act}"><span><b>${label}</b><small>${hint}</small></span><span class="num">${n}</span></button>`;
 
   const PAGES = {
     dashboard() {
@@ -236,19 +241,27 @@
       const top = Math.max(...bars.filter(b => !b.i.flag).map(b => b.n)), step = Math.max(1, Math.ceil(Math.max(...bars.map(b => b.n)) / 4 / 5) * 5), axisMax = step * 4;
       const ticks = [0, 1, 2, 3, 4].map(k => k * step), initials = name => name.replace(/[^A-Za-z0-9 ]/g, '').split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('');
       const kind = b => (b.i.flag ? 'flag' : b.n === top ? 'lead' : '');
+      const tticks = Array.from({ length: Math.floor(SERVERS.length / 2) + 1 }, (_, k) => k * 2);   // 0, 2, 4 … up to the number of trust stores
+      const trust = CA_CERTS.map(trustState).sort((a, b) => b.missing.length - a.missing.length || a.name.localeCompare(b.name));   // the ones missing in most places first
       return `${head('Dashboard', !ca ? 'Certificates from every issuing CA' : ca.flag ? esc(ca.note) : `Certificates issued by ${esc(ca.name)}, under ${esc(ca.root)}`)}
         <div class="stack">
           <div class="summary"><div class="total"><div class="num">${list.length}</div><div class="lbl">Total certificates</div></div>
-            ${stat('Expired', count('expired'), 'red', 'filter:expired')}${stat(`Expiring in ${WINDOW_DAYS} days`, count('expiring'), 'orange', 'filter:expiring')}${stat('Renewed', count('renewed'), 'blue', 'filter:renewed')}${stat('Open errors', openErrors().length, 'violet', 'go:errors')}</div>
+            ${kpi('Expired', 'past their expiry date', count('expired'), 'red', 'filter:expired')}${kpi(`Expiring in ${WINDOW_DAYS} days`, 'inside the renewal window', count('expiring'), 'orange', 'filter:expiring')}${kpi('Renewed', 'by CDM in this session', count('renewed'), 'blue', 'filter:renewed')}${kpi('Open errors', 'waiting, or raised as incidents', openErrors().length, 'violet', 'go:errors')}</div>
           <div class="card next"><div><h3>${dueN ? `${plural(dueN, 'certificate')} need${dueN === 1 ? 's' : ''} renewal` : 'Nothing needs renewal'}</h3><div class="sub">${dueN ? `Expired or expiring within ${WINDOW_DAYS} days${ca ? `, issued by ${esc(ca.name)}` : ''}.` : ca && ca.flag ? 'CDM does not renew these certificates.' : 'Every certificate in scope is valid for more than 30 days.'}</div></div>
             <div class="row"><a class="btn" href="#/certificates" data-act="filter:due">View them</a><button class="btn primary" data-act="renew-all" ${dueN && !S.busy ? '' : 'disabled'}>${icon('play')}Renew all</button></div></div>
-          <div class="card"><div class="row spread"><div><h3>Certificates by issuing CA</h3><div class="sub">Select a bar to work with one group.</div></div>
+          <div class="charts"><div class="card chartcard"><div class="row spread"><h3>Certificates by issuing CA</h3>
               <div class="legend"><span><i class="k"></i>Issuing CA</span><span><i class="k lead"></i>Most certificates</span><span><i class="k flag"></i>Needs attention</span></div></div>
             <div class="chart" role="group" aria-label="Certificates by issuing CA"><div class="axis" aria-hidden="true">${ticks.map(v => `<span style="bottom:${v / axisMax * 100}%">${v}</span>`).join('')}</div>
               <div class="plotarea"><div class="lines" aria-hidden="true">${ticks.map(v => `<i style="bottom:${v / axisMax * 100}%"></i>`).join('')}</div>
                 <div class="bars">${bars.map(b => `<button class="bar ${kind(b)} ${S.ca === b.i.id ? 'on' : ''}" data-act="ca:${S.ca === b.i.id ? 'all' : b.i.id}" aria-pressed="${S.ca === b.i.id}" title="${esc(b.i.name)}: ${plural(b.n, 'certificate')}">
                   <span class="plot"><span class="col" style="--h:${(b.n / axisMax).toFixed(4)}"><span class="v">${b.n}</span></span></span>
                   <span class="tag">${esc(initials(b.i.name))}</span><small><b>${esc(b.i.name)}</b>${b.i.flag ? 'not renewed by CDM' : b.d ? `${b.d} to renew` : 'none to renew'}</small></button>`).join('')}</div></div></div></div>
+            <div class="card trustcard"><div class="row spread"><h3>Trust stores</h3><div class="legend"><span><i class="k found"></i>Found</span><span><i class="k missing"></i>Missing</span><span><i class="k unknown"></i>Not scanned</span></div></div>
+              <div class="hchart" role="group" aria-label="CA certificates in trust stores">${trust.map(t => `<button class="hrow" data-act="trust:${esc(t.name)}" title="${esc(t.name)}: found in ${t.found.length} of ${t.scanned} scanned trust stores, missing in ${t.missing.length}">
+                <span class="hname">${esc(t.name)}</span>
+                <span class="htrack" aria-hidden="true">${[['seg-ok', t.found.length], ['seg-miss', t.missing.length], ['seg-na', t.rows.length - t.scanned]].map(([k, n]) => (n ? `<i class="${k}" style="width:${n / t.rows.length * 100}%">${n}</i>` : '')).join('')}</span></button>`).join('')}
+                <div class="haxis" aria-hidden="true"><span></span><span class="hticks">${tticks.map(v => `<i style="left:${v / SERVERS.length * 100}%">${v}</i>`).join('')}</span></div>
+                <div class="hcap">Number of server trust stores</div></div></div></div>
         </div>`;
     },
 
@@ -351,6 +364,7 @@
     agent: id => { const e = S.errors.find(x => x.id === id); if (e && e.status === 'logged') runAgent(e); },
     err: id => { S.openErr = S.openErr === id ? null : id; render(); },
     try: v => scanTrust(v),
+    trust: name => { go('trust'); scanTrust(name); },   // from the dashboard: open the scan for that CA certificate
     hit: v => { S.trust.pick = v; render(); },
   };
   document.addEventListener('click', e => {
@@ -373,6 +387,7 @@
       t('there are certificates to renew', dueList().length >= 10, dueList().length);
       { const html = PAGES.dashboard(), flagged = S.certs.filter(c => issuerOf(c).flag);
         t('the chart has a bar for every issuing CA and highlights self-signed, unapproved and the largest CA', (html.match(/class="bar /g) || []).length === ISSUERS.length && (html.match(/class="bar flag /g) || []).length === 2 && (html.match(/class="bar lead /g) || []).length === 1 && /Self-signed/.test(html) && /Unapproved CA/.test(html));
+        t('the dashboard has a separate trust store chart with a row per CA certificate', /class="card trustcard"/.test(html) && (html.match(/class="hrow"/g) || []).length === CA_CERTS.length && (html.match(/<i class="seg-miss"/g) || []).length === Object.keys(MISSING).length && /Number of server trust stores/.test(html) && !/Select a bar/.test(html) && html.indexOf('class="summary"') < html.indexOf('class="charts"'));
         t('self-signed and unapproved certificates are listed but never offered for renewal', flagged.length > 5 && flagged.every(c => !due(c)) && !dueList().some(c => issuerOf(c).flag)); }
       const total = S.certs.length; ACTIONS.ca('nw-g3');
       t('choosing an issuing CA limits what is shown', scoped().length > 0 && scoped().length < total && scoped().every(c => c.issuer === 'nw-g3') && PAGES.dashboard().includes('Northwind Root CA G3'));
