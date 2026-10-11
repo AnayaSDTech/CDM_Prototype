@@ -1,0 +1,8 @@
+<!doctype html><body style="margin:0"><iframe id="f" style="border:0;width:1500px;height:330px"></iframe><pre id="o"></pre>
+<script>const f = document.getElementById('f'), q = s => f.contentDocument.querySelector(s); let n = 0;
+f.onload = () => { n++; setTimeout(() => {
+  const total = () => q('.summary .total .num').textContent;
+  if (n === 1) { const before = total(); q('button.bar.hrow').click(); document.title = 'before ' + before + ' filtered ' + total(); q('[data-act="refresh"]').click(); }
+  else document.title += ' | loads ' + n + ' after refresh ' + total() + ' hash ' + f.contentWindow.location.hash;
+}, 400); };
+f.src = 'index.html#/dashboard';</script>

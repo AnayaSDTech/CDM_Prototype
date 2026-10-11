@@ -23,6 +23,7 @@
     bot: '<rect x="5" y="8" width="14" height="11" rx="3"/><path d="M12 4v4M9 13v2M15 13v2"/>',
     ticket: '<path d="M4 8a2 2 0 012-2h12a2 2 0 012 2v2a2 2 0 000 4v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2a2 2 0 000-4z"/><path d="M10 9h4M10 15h4"/>',
     pin: '<path d="M12 21s7-6.500 7-12a7 7 0 10-14 0c0 5.500 7 12 7 12z"/><circle cx="12" cy="9" r="2.500"/>',
+    refresh: '<path d="M20 11a8 8 0 10-2.300 6"/><path d="M20 4v7h-7"/>',
     gear: '<circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.600 5.600l2.100 2.100M16.300 16.300l2.100 2.100M5.600 18.400l2.100-2.100M16.300 7.700l2.100-2.100"/>',
   };
   const icon = n => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON[n] || ''}</svg>`;
@@ -260,8 +261,8 @@
   }
 
   // ------------------------------------------------------------------ pages
-  // `scope` adds the Issuing CA choice: only for the pages that list certificates, which it limits
-  const head = (title, sub, scope) => `<div class="top"><div><h1>${title}</h1><p>${sub}</p></div>${!scope ? '</div>' : `
+  // `scope` adds the Issuing CA choice: only for the pages that list certificates, which it limits. 'refresh' adds the dashboard's Refresh button instead.
+  const head = (title, sub, scope) => `<div class="top"><div><h1>${title}</h1><p>${sub}</p></div>${scope === 'refresh' ? `<button class="btn sm" data-act="refresh" title="Put the dashboard and all sample data back to how they started">${icon('refresh')}Refresh</button></div>` : !scope ? '</div>' : `
     <div class="scope"><label for="ca">Issuing CA</label><select id="ca" data-change="ca"><option value="all" ${S.ca === 'all' ? 'selected' : ''}>All issuing CAs</option>${ISSUERS.map(i => `<option value="${i.id}" ${S.ca === i.id ? 'selected' : ''}>${esc(i.name)}</option>`).join('')}</select></div></div>`}`;
   const stat = (label, n, color, act, on) => `<${act ? `button data-act="${act}" aria-pressed="${!!on}"` : 'div'} class="stat ${color} ${on ? 'on' : ''}"><div class="lbl">${label}</div><div class="num">${n}</div></${act ? 'button' : 'div'}>`;
 
@@ -297,7 +298,7 @@
       const step = Math.max(1, Math.ceil(Math.max(...bars.map(b => b.n)) / 4 / 5) * 5), axisMax = step * 4, ticks = [0, 1, 2, 3, 4].map(k => k * step);
       const trust = CA_CERTS.map(trustState).sort((a, b) => b.missing.length - a.missing.length || a.name.localeCompare(b.name));   // the ones missing in most places first
       const stores = trust[0].rows.length, tticks = Array.from({ length: Math.floor(stores / 2) + 1 }, (_, k) => k * 2);   // 0, 2, 4 … up to the number of trust stores
-      return `${head('Dashboard', !ca ? 'Certificates from every issuing CA' : ca.flag ? esc(ca.note) : `Certificates issued by ${esc(ca.name)}, under ${esc(ca.root)}`)}
+      return `${head('Dashboard', !ca ? 'Certificates from every issuing CA' : ca.flag ? esc(ca.note) : `Certificates issued by ${esc(ca.name)}, under ${esc(ca.root)}`, 'refresh')}
         <div class="stack">
           <div class="summary"><div class="total"><div class="num">${list.length}</div><div class="lbl">Total certificates</div></div>
             ${kpi('Expired', 'past their expiry date', count('expired'), 'red', 'filter:expired')}${kpi(`Expiring in ${WINDOW_DAYS} days`, 'inside the renewal window', count('expiring'), 'orange', 'filter:expiring')}${kpi('Renewed', 'by CDM in this session', count('renewed'), 'blue', 'filter:renewed')}${kpi('Open errors', 'waiting, or raised as incidents', openErrors().length, 'violet', 'go:errors')}</div>
@@ -450,6 +451,8 @@
     try: v => scanTrust(v),
     trust: name => { go('trust'); scanTrust(name); },   // from the dashboard: open the scan for that CA certificate
     hit: v => { S.trust.pick = v; render(); },
+    // Starts again from the first state, as a browser reload does: every renewal, error, deployment and filter is put back.
+    refresh: () => { if (location.hash && location.hash !== '#/dashboard') location.hash = '#/dashboard'; location.reload(); },
     cert: id => { S.cert = id; render(); const x = $('#cert-close'); if (x) x.focus(); },
     'cert-close': () => { S.cert = null; render(); },
     'err-open': id => { S.openErr = id; S.errFilter = 'all'; go('errors'); },
@@ -484,7 +487,7 @@
         t('the chart has a bar for every issuing CA and highlights self-signed and unapproved', (html.match(/class="bar /g) || []).length === ISSUERS.length && (html.match(/class="bar flag /g) || []).length === 2 && /Self-signed/.test(html) && /Unapproved CA/.test(html));
         t('the dashboard has a separate trust store chart with a row per CA certificate', /class="card trustcard"/.test(html) && (html.match(/class="hrow"/g) || []).length === CA_CERTS.length && (html.match(/<i class="seg-miss"/g) || []).length === Object.keys(MISSING).length && /Number of server trust stores/.test(html) && !/Not scanned/.test(html) && html.indexOf('class="summary"') < html.indexOf('class="charts"'));
         t('self-signed and unapproved certificates are listed but never offered for renewal', flagged.length > 5 && flagged.every(c => !due(c)) && !dueList().some(c => issuerOf(c).flag)); }
-      t('the Issuing CA choice is only on the pages it limits', ['certificates', 'renewal'].every(k => /id="ca"/.test(PAGES[k]())) && ['dashboard', 'errors', 'trust', 'config'].every(k => !/id="ca"/.test(PAGES[k]())));
+      t('the Issuing CA choice is only on the pages it limits', /data-act="refresh"/.test(PAGES.dashboard()) && ['certificates', 'renewal'].every(k => /id="ca"/.test(PAGES[k]())) && ['dashboard', 'errors', 'trust', 'config'].every(k => !/id="ca"/.test(PAGES[k]())));
       { page = 'certificates'; render(); const sel = $('#ca'), all = document.querySelectorAll('#view tbody tr').length; sel.value = 'dc-2020'; sel.dispatchEvent(new Event('change', { bubbles: true }));
         const rows = [...document.querySelectorAll('#view tbody tr')]; t('choosing an issuing CA in the dropdown filters the list on screen', S.ca === 'dc-2020' && rows.length > 0 && rows.length < all && rows.every(r => /DigiCert TLS/.test(r.textContent)) && $('#ca').value === 'dc-2020', [all, rows.length]); }
       { page = 'errors'; render(); const rows = () => document.querySelectorAll('#view .errtable tbody tr').length, all = rows(), tiles = document.querySelectorAll('#view button.stat').length;
